@@ -1,0 +1,128 @@
+# ============================================================================
+#  FloatTrip 飞牛 NAS 部署配置
+# ============================================================================
+#
+#  与根目录 docker-compose.yml 的区别：
+#    - 不含 build 段，直接拉取 Docker Hub 上的现成镜像（NAS 通常无源码）
+#    - 不依赖 .env 文件，密钥直接写在下方 environment 中（飞牛界面更易维护）
+#    - 数据使用 Docker 命名卷，不依赖飞牛的目录结构，无需处理权限问题
+#
+#  ─────────────────────────── 部署前必做 ───────────────────────────
+#
+#  填写下方 environment 中标有「← 必填」的两项密钥，否则容器会启动失败：
+#
+#    1) AMAP_API_KEY      高德【Web 服务】Key
+#                         获取：https://lbs.amap.com/ → 控制台 → 应用管理
+#                         → 创建应用 → 添加 Key → 服务平台选「Web 服务」
+#                         ⚠️ 不要填 Web端(JS API) Key，填错会在规划时才报错
+#
+#    2) DEEPSEEK_API_KEY  DeepSeek API Key
+#                         获取：https://platform.deepseek.com/ → API Keys
+#
+#  ─────────────────────────── 部署方式（二选一）───────────────────────────
+#
+#  方式 A：飞牛 Docker 界面
+#    1. 将本文件内容复制到飞牛「Docker → Compose → 新建项目」的编辑框中
+#    2. 项目名称填 floattrip
+#    3. 点「部署」，等待镜像拉取完成
+#
+#  方式 B：SSH 命令行
+#    1. 把本文件上传到 NAS，例如 /vol1/1000/docker/floattrip/
+#    2. 在该目录执行：docker compose -f docker-compose.nas.yml up -d
+#
+#  部署完成后浏览器访问：http://<NAS的IP>:8765
+#  日志查看：docker logs floattrip  （飞牛界面里也可直接看容器日志）
+#
+# ============================================================================
+
+services:
+  floattrip:
+    # 直接使用 Docker Hub 上的镜像，无需在 NAS 上构建
+    # 如需固定版本，可把 latest 换成具体标签，例如 :v1.0.0
+    image: hotpot1993/floattrip:latest
+
+    container_name: floattrip
+
+    # 开机自启；手动停止后不会被自动拉起。
+    # 注意：若密钥未填写或填写错误，容器会启动失败并被反复重启（状态显示
+    # Restarting），日志也会重复输出。修正配置后执行 down 再 up 即可。
+    restart: unless-stopped
+
+    # 左侧 8765 是 NAS 对外端口，若被占用可改成 8876:8765 之类
+    ports:
+      - "8765:8765"
+
+    environment:
+      # ───── 必填项：必须替换下面两个占位符，否则容器会拒绝启动 ─────
+      # 入口脚本会识别「填写 / 你的 / xxx」等占位文本并中止，避免用无效密钥
+      # 跑起来、直到发起规划请求才失败。
+      AMAP_API_KEY: "<在此填写高德Web服务Key>"          # ← 必填，高德【Web 服务】Key
+      DEEPSEEK_API_KEY: "<在此填写DeepSeek的Key>"        # ← 必填，DeepSeek API Key
+
+      # ───── 可选配置 ─────
+      # LLM 提供商，默认 deepseek；改用豆包时填 doubao 并补 DOUBAO_API_KEY
+      # LLM_PROVIDER: "deepseek"
+      # DOUBAO_API_KEY: ""
+
+      # 前端地图可视化用的高德 Web端(JS API) Key，不填则地图区域降级提示
+      # AMAP_JS_KEY: ""
+      # AMAP_JS_SECURITY_CODE: ""
+
+      # 容器时区，影响日志时间显示；应用内部行程日期固定按 Asia/Shanghai 计算
+      TZ: "Asia/Shanghai"
+
+      # 缓存：留空即自动禁用，不影响主流程
+      # 若同时启动了下方 redis 服务，改为 redis://redis:6379/0
+      REDIS_URL: ""
+
+      # 并发与 checkpoint 落盘位置（以下为默认值，一般无需修改）
+      # RUNTIME_CHECKPOINT_DB: "data/langgraph-checkpoints.db"
+      # RUNTIME_CHAT_CONCURRENCY: "8"
+      # RUNTIME_PLANNING_CONCURRENCY: "2"
+
+    # 数据持久化：命名卷由 Docker 管理，容器重建后规划历史不丢失
+    # 命名卷名会带项目名前缀，例如 floattrip_floattrip-data
+    volumes:
+      - floattrip-data:/app/data
+
+    # 与 Dockerfile 中的 HEALTHCHECK 一致，飞牛界面会显示健康状态
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+    # 日志轮转，避免长期运行占满 NAS 存储
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ──────────────────────────────────────────────────────────────────────
+  #  可选：Redis 缓存服务
+  #
+  #  启用方式：
+  #    1. 取消下面整段注释
+  #    2. 把上面 floattrip 的 REDIS_URL 改为 redis://redis:6379/0
+  #  说明：不启用也完全可用，高德 API 结果缓存会被跳过。
+  #        飞牛 Compose 界面若不支持 profiles，请把 profiles 两行删掉。
+  # ──────────────────────────────────────────────────────────────────────
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: floattrip-redis
+  #   restart: unless-stopped
+  #   command: ["redis-server", "--appendonly", "yes"]
+  #   volumes:
+  #     - floattrip-redis-data:/data
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 3s
+  #     retries: 5
+
+volumes:
+  floattrip-data:
+  # 启用 Redis 时一并取消下面这行注释
+  # floattrip-redis-data:

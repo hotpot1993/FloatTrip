@@ -40,6 +40,49 @@ rm -f "$DATA_DIR/.write-test"
 missing_amap=""
 missing_llm=""
 missing_llm_name=""
+placeholder_keys=""
+
+# 识别 compose 模板中未替换的占位符。
+# 必要性：仅判断「非空」会放行 "在此填写高德Web服务Key" 这类占位文本，
+# 容器会看似正常启动并通过健康检查，直到真正发起规划请求才因密钥无效失败，
+# 届时高德返回的认证错误很难定位。此处提前拦截，让问题在启动阶段暴露。
+check_placeholder() {
+    _name="$1"
+    eval "_val=\${$_name:-}"
+    if [ -n "$_val" ] && [ ${#_val} -lt 50 ]; then
+        case "$_val" in
+            *填写*|*你的*|*替换*|*改成*|*填入*|*请填*|*your_*|*YOUR_*|*CHANGE*|*changeme*|*xxx*|*XXX*)
+                placeholder_keys="${placeholder_keys}${_name} "
+                ;;
+        esac
+    fi
+}
+
+check_placeholder AMAP_API_KEY
+check_placeholder DEEPSEEK_API_KEY
+check_placeholder DOUBAO_API_KEY
+
+if [ -n "$placeholder_keys" ]; then
+    echo "" >&2
+    echo "================================================================" >&2
+    echo " 启动中止：检测到未替换的占位符" >&2
+    echo "================================================================" >&2
+    echo "" >&2
+    echo " 以下环境变量的值仍是模板里的示例文本，请替换为真实密钥：" >&2
+    for _k in $placeholder_keys; do
+        echo "   - ${_k}" >&2
+    done
+    echo "" >&2
+    echo " 在飞牛 NAS 上：Docker → Compose → 找到本项目 → 编辑环境变量" >&2
+    echo " 在命令行上：编辑 docker-compose.nas.yml 中的 environment 段" >&2
+    echo "" >&2
+    echo " 密钥获取位置：" >&2
+    echo "   AMAP_API_KEY      https://lbs.amap.com/  创建应用后选「Web 服务」类型" >&2
+    echo "   DEEPSEEK_API_KEY  https://platform.deepseek.com/  API Keys" >&2
+    echo "================================================================" >&2
+    echo "" >&2
+    exit 1
+fi
 
 # 高德地图 Key 为必需项（Web 服务 Key，用于 POI 搜索与天气查询）
 if [ -z "${AMAP_API_KEY:-}" ]; then
@@ -99,6 +142,5 @@ fi
 echo "[entrypoint] 数据目录就绪：$DATA_DIR"
 echo "[entrypoint] 环境变量检查通过"
 echo "[entrypoint] 启动命令：$*"
-
 # 执行 CMD 传入的命令（默认：python run.py，监听 0.0.0.0:8765）
 exec "$@"

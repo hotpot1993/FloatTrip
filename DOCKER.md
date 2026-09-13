@@ -242,6 +242,8 @@ sudo chown -R 10001:10001 ./data
 | `Dockerfile` | 镜像构建定义 |
 | `.dockerignore` | 构建上下文排除规则，防止密钥与数据入镜像 |
 | `docker-compose.yml` | 一键编排，含可选 Redis 与数据卷 |
+| `docker-compose.nas.yml` | **飞牛 NAS 专用**编排：直接拉取镜像、密钥内联、命名卷 |
+| `DOCKER-NAS.md` | 飞牛 NAS 部署指南（部署步骤、密钥、备份、排查） |
 | `build.ps1` | Windows 构建推送脚本（中文提示、失败中止） |
 | `build.sh` | Linux/macOS 构建推送脚本 |
 | `docker/entrypoint.sh` | 容器入口：启动前校验数据目录可写，并预检必需密钥（缺失时给出中文指引） |
