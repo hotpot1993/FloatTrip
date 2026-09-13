@@ -1,0 +1,65 @@
+# Docker 构建上下文排除规则
+#
+# 目的：缩小构建上下文体积、加速构建，并避免把本地密钥与运行期数据打进镜像。
+# 注意：app/、frontend/、run.py、requirements.txt 为运行必需，绝不能在此排除。
+#
+# 采用「明确列出顶层条目」的写法而非宽泛通配符，避免 *.html 之类的规则
+# 误伤 frontend/index.html 这类运行必需资源。
+
+# ───────────── 版本控制与编辑器 ─────────────
+.git
+.github
+.codex
+.vscode
+.idea
+
+# ───────────── 敏感文件（严禁入镜像）─────────────
+# .env.local 存放高德与 LLM 的真实 API Key，必须通过运行时环境变量注入
+.env
+.env.local
+# 保留 .env.example 作为镜像内的配置参考文档
+!.env.example
+
+# ───────────── 运行时数据（应由数据卷挂载）─────────────
+# 包含 langgraph-checkpoints.db 及其 WAL/SHM 文件，属于机器本地状态
+data
+
+# ───────────── Python 缓存与虚拟环境 ─────────────
+# 依赖在镜像内重新安装，本地虚拟环境无需传入
+.venv
+.venv-docker-test
+venv
+env
+__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# ───────────── 前端与移动端依赖 ─────────────
+# 纯客户端工程，与后端镜像运行无关
+mobile-app
+mobile-prototype
+xiaohongshu-floattrip
+node_modules
+
+# ───────────── 文档、测试与设计稿 ─────────────
+docs
+openspec
+tests
+static
+app-pages-preview.html
+launch-page.html
+docs.md
+LLM_PROVIDERS.md
+README.md
+
+# ───────────── 容器编排与本地脚本 ─────────────
+# 这些文件作用于宿主机，不需要进入镜像
+docker-compose.yml
+docker-compose.yaml
+build.sh
+build.ps1
+DOCKER.md
+.gitattributes

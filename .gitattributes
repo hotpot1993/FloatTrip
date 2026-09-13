@@ -1,0 +1,18 @@
+# 换行符规范
+#
+# 背景：本仓库在 Windows 上开发，默认检出会把文本文件转成 CRLF。
+# 但容器内执行 shell 脚本时，CRLF 会让 /bin/sh 报 "$'\r': command not found"，
+# 因此对容器相关文件强制使用 LF，不受本地 core.autocrlf 设置影响。
+
+# ───────────── 容器相关文件：强制 LF ─────────────
+*.sh text eol=lf
+docker/*.sh text eol=lf
+Dockerfile text eol=lf
+docker-compose.yml text eol=lf
+docker-compose.yaml text eol=lf
+.dockerignore text eol=lf
+*.dockerignore text eol=lf
+
+# ───────────── 其余文本文件：按平台自动处理 ─────────────
+# 这些文件不参与容器构建，CRLF 不影响功能
+* text=auto

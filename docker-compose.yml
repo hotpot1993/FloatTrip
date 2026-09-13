@@ -1,0 +1,78 @@
+# FloatTrip Docker Compose 编排文件
+#
+# 用法：
+#   1. 准备配置文件：复制 .env.example 为 .env，填入 AMAP_API_KEY 与 DEEPSEEK_API_KEY
+#   2. 启动服务：docker compose up -d
+#   3. 访问服务：http://localhost:8765
+#
+# 说明：
+#   - Redis 为可选增强项，默认不启动；需要时用 --profile cache 开启
+#   - data/ 目录挂载到宿主机，保证 SQLite 数据与规划历史在容器重建后不丢失
+
+services:
+  # ─────────────────────────── 主应用服务 ───────────────────────────
+  floattrip:
+    # 优先使用本地构建；若只想拉取 Docker Hub 镜像，可注释 build 段
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hotpot1993/floattrip:latest
+    container_name: floattrip
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+
+    # 密钥与配置全部通过环境变量注入，不打进镜像
+    # 缺少 .env 文件时 compose 会给出提示，可改用 environment 直接书写
+    env_file:
+      - .env
+
+    environment:
+      # 数据落盘位置（容器内路径，对应下方挂载卷）
+      RUNTIME_CHECKPOINT_DB: data/langgraph-checkpoints.db
+      # 默认不启用 Redis；使用下方 cache 服务时改为 redis://redis:6379/0
+      REDIS_URL: ""
+
+    # 数据持久化：SQLite 数据库与 checkpoint 文件
+    volumes:
+      - ./data:/app/data
+
+    # 依赖 Redis 时取消注释（同时需开启 --profile cache）
+    # depends_on:
+    #   redis:
+    #     condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+    # 日志轮转，避免长跑容器撑满磁盘
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ─────────────────────────── 可选：Redis 缓存 ───────────────────────────
+  # 启用方式：docker compose --profile cache up -d
+  # 启用后请把上面主服务的 REDIS_URL 改为 redis://redis:6379/0
+  redis:
+    image: redis:7-alpine
+    container_name: floattrip-redis
+    restart: unless-stopped
+    profiles:
+      - cache
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis-data:
