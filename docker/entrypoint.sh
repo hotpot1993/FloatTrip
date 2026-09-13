@@ -31,7 +31,73 @@ if ! touch "$DATA_DIR/.write-test" 2>/dev/null; then
 fi
 rm -f "$DATA_DIR/.write-test"
 
+# ─────────────────────────── 环境变量预检 ───────────────────────────
+# 背景：应用在启动阶段就会构建 LLM 客户端，缺少密钥会直接抛错退出
+#       （RuntimeError: 缺少 DEEPSEEK_API_KEY）。应用自身的报错文案面向本地开发
+#       （提示配置 .env.local），容器用户看到会困惑，因此在此提前拦截，
+#       并给出 --env-file / -e 在容器场景下的正确用法。
+
+missing_amap=""
+missing_llm=""
+missing_llm_name=""
+
+# 高德地图 Key 为必需项（Web 服务 Key，用于 POI 搜索与天气查询）
+if [ -z "${AMAP_API_KEY:-}" ]; then
+    missing_amap=1
+fi
+
+# LLM 提供商的必需密钥随 LLM_PROVIDER 变化，默认 deepseek
+case "$(printf '%s' "${LLM_PROVIDER:-deepseek}" | tr '[:upper:]' '[:lower:]')" in
+    deepseek)
+        if [ -z "${DEEPSEEK_API_KEY:-}" ]; then
+            missing_llm=1
+            missing_llm_name="DEEPSEEK_API_KEY"
+        fi
+        ;;
+    doubao)
+        if [ -z "${DOUBAO_API_KEY:-}" ]; then
+            missing_llm=1
+            missing_llm_name="DOUBAO_API_KEY"
+        fi
+        ;;
+esac
+
+if [ -n "$missing_amap" ] || [ -n "$missing_llm" ]; then
+    echo "" >&2
+    echo "================================================================" >&2
+    echo " 启动中止：缺少必需的环境变量" >&2
+    echo "================================================================" >&2
+    echo "" >&2
+    echo " 缺失项：" >&2
+    if [ -n "$missing_amap" ]; then
+        echo "   - AMAP_API_KEY      高德【Web 服务】Key（注意不是 JS API Key）" >&2
+    fi
+    if [ -n "$missing_llm" ]; then
+        echo "   - ${missing_llm_name}  LLM API Key（当前 LLM_PROVIDER=${LLM_PROVIDER:-deepseek}）" >&2
+    fi
+    echo "" >&2
+    echo " 容器中请用环境变量注入；镜像内不存在也不应存在 .env.local。" >&2
+    echo "" >&2
+    echo " 推荐做法（在项目根目录先执行 cp .env.example .env 并填写）：" >&2
+    echo "   docker run -d --name floattrip -p 8765:8765 \\" >&2
+    echo "     --env-file .env -v \"\${PWD}/data:/app/data\" \\" >&2
+    echo "     hotpot1993/floattrip:latest" >&2
+    echo "" >&2
+    echo " 或用 -e 直接指定：" >&2
+    echo "   docker run -d -p 8765:8765 \\" >&2
+    echo "     -e AMAP_API_KEY=你的高德Web服务Key \\" >&2
+    echo "     -e DEEPSEEK_API_KEY=你的DeepSeekKey \\" >&2
+    echo "     hotpot1993/floattrip:latest" >&2
+    echo "" >&2
+    echo " 使用 docker compose 时，确认项目根目录存在 .env 文件后执行：" >&2
+    echo "   docker compose up -d" >&2
+    echo "================================================================" >&2
+    echo "" >&2
+    exit 1
+fi
+
 echo "[entrypoint] 数据目录就绪：$DATA_DIR"
+echo "[entrypoint] 环境变量检查通过"
 echo "[entrypoint] 启动命令：$*"
 
 # 执行 CMD 传入的命令（默认：python run.py，监听 0.0.0.0:8765）
