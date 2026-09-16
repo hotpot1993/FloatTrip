@@ -81,6 +81,50 @@ function ConcernModal({ concern, onKeep, onConfirm }) {
   );
 }
 
+/* ── 通用确认弹窗 ─────────────────────────────── */
+/* 供破坏性操作复用。默认焦点落在「取消」上，Esc 与点击遮罩都能关闭，
+   确认按钮仅在调用方显式声明 danger 时使用危险样式。 */
+function ConfirmModal({
+  title, message, children, confirmLabel = "确认", cancelLabel = "取消",
+  danger = false, busy = false, onConfirm, onCancel,
+}) {
+  const cancelRef = React.useRef(null);
+  // 用 ref 承载最新的回调与忙碌状态，使下面的副作用只在挂载时执行一次，
+  // 避免父组件重渲染时反复把焦点抢回取消按钮。
+  const latest = React.useRef({ onCancel, busy });
+  latest.current = { onCancel, busy };
+
+  React.useEffect(() => {
+    cancelRef.current?.focus();
+    const onKey = (e) => {
+      if (e.key === "Escape" && !latest.current.busy) latest.current.onCancel?.();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  return (
+    <div className="modal-backdrop" onClick={() => { if (!busy) onCancel?.(); }}>
+      <div className="modal-card" role="dialog" aria-modal="true"
+        aria-labelledby="confirm-modal-title"
+        onClick={(e) => e.stopPropagation()}>
+        <div className="modal-title" id="confirm-modal-title">{title}</div>
+        {message && <div className="modal-sub">{message}</div>}
+        {children}
+        <div className="confirm-actions">
+          <button ref={cancelRef} className="confirm-cancel" onClick={onCancel} disabled={busy}>
+            {cancelLabel}
+          </button>
+          <button className={danger ? "confirm-danger" : "confirm-primary"}
+            onClick={onConfirm} disabled={busy}>
+            {busy ? "处理中…" : confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── 持久化旅行对话 ─────────────────────────────── */
 function ChatPage({ currentUsername, onRequestLogin, onOpenPlan }) {
   const [conversations, setConversations] = React.useState([]);
@@ -742,6 +786,8 @@ function PlanningBriefCard({ brief, onUpdate, onSubmit, onDiscard }) {
       destination: form.destination ?? "",
       start_date: form.start_date ?? "",
       end_date: form.end_date ?? "",
+      arrival_time: form.arrival_time ?? "",
+      departure_time: form.departure_time ?? "",
       days: form.days === "" ? null : Number(form.days),
       trip_budget: form.trip_budget ?? form.budget ?? "",
       trip_constraints: constraints.filter(item => item.value_text?.trim()).map(item => ({
@@ -785,6 +831,10 @@ function PlanningBriefCard({ brief, onUpdate, onSubmit, onDiscard }) {
     ["destination", "目的地", "text"],
     ["start_date", "开始日期", "date"],
     ["end_date", "结束日期", "date"],
+    // 抵达/返程用文本框而不是 time 选择器：字段要能承载「傍晚」这类原话，
+    // 而 time 控件遇到非 HH:MM 的值会显示为空，等于把用户说过的话弄丢。
+    ["arrival_time", "抵达时刻", "text", "如 18:30，也可填「傍晚」"],
+    ["departure_time", "返程时刻", "text", "如 15:00，也可填「下午」"],
     ["days", "天数", "number"],
     ["trip_budget", "本次预算", "text"],
   ];
@@ -827,11 +877,12 @@ function PlanningBriefCard({ brief, onUpdate, onSubmit, onDiscard }) {
       </div>
       {editing ? (
         <div className="brief-grid">
-          {fields.map(([key, label, type]) => (
+          {fields.map(([key, label, type, placeholder]) => (
             <label key={key}>{label}
               <input
                 type={type}
                 value={form[key] || ""}
+                placeholder={placeholder}
                 onChange={e => setForm({ ...form, [key]: e.target.value })}
               />
             </label>
@@ -863,6 +914,10 @@ function PlanningBriefCard({ brief, onUpdate, onSubmit, onDiscard }) {
           <div className="brief-date">
             <span>出行时间</span>
             <strong>{view.dateLabel}</strong>
+          </div>
+          <div className="brief-date">
+            <span>抵达 / 返程</span>
+            <strong>{view.timeWindowLabel}</strong>
           </div>
           {view.preferences.length > 0 && (
             <dl className="brief-preferences">
@@ -1900,22 +1955,73 @@ function TripDetailPage({ plan: planProp, planId: planIdProp, onRequestModify, o
 }
 
 /* ── 历史行程页 ───────────────────────────────── */
+
+/* 卡片与确认弹窗共用同一套派生逻辑，避免两处展示不一致。 */
+function tripDates(t) {
+  const s = t.start_date ? t.start_date.replace(/-/g, ".").slice(2) : "";
+  const e = t.end_date ? t.end_date.replace(/-/g, ".").slice(2) : "";
+  return s && e ? `${s} — ${e}` : (t.created_at || "").slice(0, 10);
+}
+
+function tripDays(t) {
+  return t.days_count ||
+    (t.start_date && t.end_date
+      ? Math.ceil((new Date(t.end_date) - new Date(t.start_date)) / 86400000) + 1
+      : 1);
+}
+
 function HistoryPage({ onOpenPlan, currentUsername }) {
   const [trips, setTrips] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
+  const [pendingDelete, setPendingDelete] = React.useState(null);
+  const [deleting, setDeleting] = React.useState(false);
+  const [deleteError, setDeleteError] = React.useState("");
 
-  React.useEffect(() => {
-    getHistory().then(data => {
+  const load = React.useCallback(async () => {
+    try {
+      const data = await getHistory();
       setTrips(Array.isArray(data) ? data : []);
+    } catch {
+      setTrips([]);
+    } finally {
       setLoading(false);
-    }).catch(() => { setTrips([]); setLoading(false); });
+    }
   }, []);
+
+  React.useEffect(() => { load(); }, [load]);
 
   const open = async (trip) => {
     try {
       const data = await getHistoryItem(trip.id);
       if (data && data.plan) onOpenPlan && onOpenPlan(data.plan, trip.id);
     } catch {}
+  };
+
+  const askDelete = (trip) => {
+    setDeleteError("");
+    setPendingDelete(trip);
+  };
+
+  const cancelDelete = () => {
+    if (deleting) return;
+    setPendingDelete(null);
+    setDeleteError("");
+  };
+
+  const confirmDelete = async () => {
+    if (!pendingDelete) return;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await deleteHistoryItem(pendingDelete.id);
+      setPendingDelete(null);
+      await load();
+    } catch (e) {
+      // 删除失败时保留弹窗与目标，让用户能重试或改用取消退出
+      setDeleteError(e.message || "删除失败，请稍后重试");
+    } finally {
+      setDeleting(false);
+    }
   };
 
   return (
@@ -1950,26 +2056,27 @@ function HistoryPage({ onOpenPlan, currentUsername }) {
             const dest = t.destination || "旅行";
             const encDest = encodeURIComponent(dest);
             const imgUrl = `https://picsum.photos/seed/${encDest}-${t.id}/600/760`;
-            const dates = (() => {
-              const s = t.start_date ? t.start_date.replace(/-/g, ".").slice(2) : "";
-              const e = t.end_date ? t.end_date.replace(/-/g, ".").slice(2) : "";
-              return s && e ? `${s} — ${e}` : (t.created_at || "").slice(0, 10);
-            })();
-            const daysCount = t.days_count ||
-              (t.start_date && t.end_date
-                ? Math.ceil((new Date(t.end_date) - new Date(t.start_date)) / 86400000) + 1
-                : 1);
+            const dates = tripDates(t);
+            const daysCount = tripDays(t);
             const isModified = !!t.parent_id;
 
             return (
               <div key={t.id} className="trip-cover"
                 onClick={() => open(t)} role="button" tabIndex={0}
-                onKeyDown={(e) => e.key === "Enter" && open(t)}>
+                onKeyDown={(e) => { if (e.key === "Enter" && e.target === e.currentTarget) open(t); }}>
                 <div className="tc-img" style={{ backgroundImage: `url('${imgUrl}')` }}></div>
                 <div className="tc-shade"></div>
                 <div className="tc-top">
                   <span>VOL.{String(idx + 1).padStart(2, "0")}</span>
-                  <span>{daysCount} DAYS</span>
+                  <span className="tc-top-actions">
+                    <span>{daysCount} DAYS</span>
+                    {/* 卡内按钮：点击不冒泡，否则会同时触发整卡的 open */}
+                    <button type="button" className="tc-delete"
+                      aria-label={`删除 ${dest} 的行程`} title={`删除 ${dest} 的行程`}
+                      onClick={(e) => { e.stopPropagation(); askDelete(t); }}>
+                      ✕
+                    </button>
+                  </span>
                 </div>
                 <div className="tc-body">
                   <div className="tc-dest">{dest}</div>
@@ -1983,6 +2090,24 @@ function HistoryPage({ onOpenPlan, currentUsername }) {
             );
           })}
         </div>
+      )}
+
+      {pendingDelete && (
+        <ConfirmModal
+          title="删除这份行程？"
+          message="删除后无法恢复，这份行程会立即从归档中移除。"
+          danger busy={deleting}
+          confirmLabel="确认删除" cancelLabel="取消"
+          onConfirm={confirmDelete} onCancel={cancelDelete}>
+          <div className="confirm-summary">
+            <div className="cs-dest">{pendingDelete.destination || "未命名行程"}</div>
+            <div className="cs-meta">{tripDates(pendingDelete)} · {tripDays(pendingDelete)} 天</div>
+          </div>
+          <div className="confirm-warning">
+            同一趟旅行的其他版本、来源对话与规划记录都会保留。
+          </div>
+          {deleteError && <div className="confirm-error" role="alert">{deleteError}</div>}
+        </ConfirmModal>
       )}
     </div>
   );

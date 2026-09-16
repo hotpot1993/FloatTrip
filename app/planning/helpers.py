@@ -265,6 +265,177 @@ def _to_minutes(hhmm: str) -> int | None:
     return int(m.group(1)) * 60 + int(m.group(2))
 
 
+# ─── 抵达 / 返程时刻窗口 ──────────────────────────────────────
+# 用户对抵达或返程时刻的表述可能不精确（如「傍晚抵达」）。系统保留原话用于展示，
+# 另用下面的对照表把它换算成排程与核验可用的时刻——换算结果只表达
+# 「不得早于/晚于何时安排」，不代表系统知道了用户的真实抵达或离开时刻。
+
+_PERIOD_WORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("morning", ("上午", "早上", "早晨", "一早")),
+    ("noon", ("中午", "正午", "晌午")),
+    ("afternoon", ("下午", "午后")),
+    ("evening", ("傍晚", "黄昏", "日落")),
+    ("night", ("晚上", "晚间", "夜里", "夜晚")),
+)
+
+# 抵达：该时段的右端——用户说「傍晚到」通常指那个时段内落地，
+# 取右端意味着系统假定他要到时段末尾才能开始活动，宁可排少不排错。
+ARRIVAL_FLOOR_BY_PERIOD = {
+    "morning": "12:00",    # 上午 09:00–12:00
+    "noon": "14:00",       # 中午 12:00–14:00
+    "afternoon": "17:00",  # 下午 14:00–17:00
+    "evening": "19:00",    # 傍晚 17:00–19:00
+    "night": "21:00",      # 晚上 19:00 之后
+}
+
+# 返程：该时段「最早可能离开」的时刻。方向与抵达相反——
+# 返程还要再减去赶车缓冲，因此按更早的一端估算才安全。
+DEPARTURE_EDGE_BY_PERIOD = {
+    "morning": "09:00",
+    "noon": "12:00",
+    "afternoon": "14:00",
+    "evening": "17:00",
+    "night": "19:00",
+}
+
+# 抵达不早于此刻时，首日视为过晚抵达，不再安排任何景点
+LATE_ARRIVAL_CUTOFF = "21:00"
+
+# 末日景点必须在返程时刻之前留出的赶车缓冲（分钟）
+DEPARTURE_BUFFER_MINUTES = 120
+
+# 12 小时制补正：这些词出现时，小于 12 的钟点数按下午处理
+_PM_WORDS = ("中午", "下午", "午后", "傍晚", "黄昏", "日落", "晚上", "晚间", "夜里", "夜晚")
+
+
+def _parse_clock(text: str) -> str | None:
+    """从文本里解析出具体时刻（HH:MM）：18:30 / 18：30 / 下午3点 / 傍晚6点。"""
+    m = re.search(r"(\d{1,2})[:：](\d{2})", text)
+    if m:
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+    m = re.search(r"(\d{1,2})\s*[点时]", text)
+    if m:
+        hour = int(m.group(1))
+        if hour < 12 and any(word in text for word in _PM_WORDS):
+            hour += 12
+        if 0 <= hour <= 23:
+            return f"{hour:02d}:00"
+    return None
+
+
+def _match_period(text: str) -> str | None:
+    for key, words in _PERIOD_WORDS:
+        if any(word in text for word in words):
+            return key
+    return None
+
+
+def _resolve_time(value: str | None, table: dict[str, str]) -> str | None:
+    """先取具体时刻，取不到再按时段词查表；都无法识别时返回 None。"""
+    text = (value or "").strip()
+    if not text:
+        return None
+    clock = _parse_clock(text)
+    if clock:
+        return clock
+    period = _match_period(text)
+    return table.get(period) if period else None
+
+
+def arrival_floor(value: str | None) -> str | None:
+    """抵达可用下界（HH:MM）：首日不得早于此刻开始安排活动。"""
+    return _resolve_time(value, ARRIVAL_FLOOR_BY_PERIOD)
+
+
+def departure_edge(value: str | None) -> str | None:
+    """返程时刻的保守取值（HH:MM）：该时段最早可能离开的时刻。"""
+    return _resolve_time(value, DEPARTURE_EDGE_BY_PERIOD)
+
+
+def is_late_arrival(value: str | None) -> bool:
+    """抵达下界是否晚于深夜阈值。"""
+    minutes = _to_minutes(arrival_floor(value) or "")
+    cutoff = _to_minutes(LATE_ARRIVAL_CUTOFF) or 0
+    return minutes is not None and minutes > cutoff
+
+
+def departure_deadline(value: str | None) -> str | None:
+    """末日景点必须在此刻之前结束（返程时刻减去赶车缓冲）。"""
+    minutes = _to_minutes(departure_edge(value) or "")
+    if minutes is None:
+        return None
+    latest = max(0, minutes - DEPARTURE_BUFFER_MINUTES)
+    return f"{latest // 60:02d}:{latest % 60:02d}"
+
+
+def single_day_window(arrival: str | None, departure: str | None) -> tuple[str, str] | None:
+    """单日行程的可用窗口；窗口不存在或过窄时返回 None。"""
+    start = _to_minutes(arrival_floor(arrival) or "")
+    end = _to_minutes(departure_deadline(departure) or "")
+    if start is None or end is None or end <= start:
+        return None
+    return f"{start // 60:02d}:{start % 60:02d}", f"{end // 60:02d}:{end % 60:02d}"
+
+
+# 首日规则
+FIRST_DAY_EVENING_ONLY = "evening_only"   # 只排晚餐与一个夜间可玩点
+FIRST_DAY_NO_SPOTS = "no_spots"           # 抵达过晚，首日不排景点
+# 末日规则
+LAST_DAY_BEFORE_DEADLINE = "before_deadline"
+
+
+def time_window_plan(
+    arrival: str | None, departure: str | None, days: int | None
+) -> dict[str, Any] | None:
+    """把抵达与返程表述换算成确定性的排程规则，供提示词与核验消费。
+
+    规则由这里决定、提示词只负责措辞：首末两天的处理属于会静默出错的分支逻辑，
+    放在可单测的纯函数里比散在 f-string 中可靠。
+
+    返回 None 表示用户两处都没提供，调用方应保持与引入该能力之前完全一致的行为。
+    """
+    arrival = (arrival or "").strip()
+    departure = (departure or "").strip()
+    if not arrival and not departure:
+        return None
+
+    total_days = days if isinstance(days, int) and days > 0 else 0
+    plan: dict[str, Any] = {
+        "arrival": arrival or None,
+        "arrival_floor": arrival_floor(arrival) if arrival else None,
+        "departure": departure or None,
+        "departure_edge": departure_edge(departure) if departure else None,
+        "departure_deadline": departure_deadline(departure) if departure else None,
+        "days": total_days,
+        "first_day": None,
+        "last_day": None,
+        "single_day_window": None,
+        "single_day_too_narrow": False,
+        "single_day_unknown": False,
+    }
+
+    if total_days == 1:
+        window = single_day_window(arrival, departure)
+        if window:
+            plan["single_day_window"] = window
+        elif plan["arrival_floor"] or plan["departure_deadline"]:
+            # 窗口真实存在但装不下任何活动（例如傍晚到、当晚就走）
+            plan["single_day_too_narrow"] = True
+        else:
+            # 表述无法识别，无法证明窗口够用，按最保守处理
+            plan["single_day_unknown"] = True
+    elif total_days >= 2:
+        if arrival:
+            plan["first_day"] = (
+                FIRST_DAY_NO_SPOTS if is_late_arrival(arrival) else FIRST_DAY_EVENING_ONLY
+            )
+        if departure:
+            plan["last_day"] = LAST_DAY_BEFORE_DEADLINE
+    return plan
+
+
 def open_time_violations(route: list[dict[str, Any]], pois: list[dict[str, Any]]) -> list[str]:
     """检查每个景点游玩时段是否落在开放时间内。"""
     open_map = {s["name"]: (s.get("open_time") or "") for s in pois}

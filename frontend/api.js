@@ -290,6 +290,12 @@ async function getHistoryItem(id) {
   return r.json();
 }
 
+/* 删除一条行程。不可恢复，因此不像上面两个读接口那样吞掉错误——
+   失败必须抛给调用方，由页面展示可读原因。 */
+function deleteHistoryItem(id) {
+  return apiJson(`/api/history/${id}`, { method: "DELETE" });
+}
+
 /* ── Profile ──────────────────────────────────────── */
 async function getProfile() {
   const r = await fetch("/api/profile", { headers: authHeaders() });
@@ -813,7 +819,7 @@ Object.assign(window, {
   getAuth, setAuth, clearAuth, authHeaders,
   loginApi, registerApi, checkAuth,
   streamPlan, confirmModification,
-  getHistory, getHistoryItem,
+  getHistory, getHistoryItem, deleteHistoryItem,
   getProfile, createMemoryFact, updateMemoryFact, approveMemoryFact, deleteMemoryFact,
   listConversations, createConversation, markConversationViewed,
   getConversationMessages, submitConversationMessage,

@@ -72,6 +72,8 @@ class BriefPatch(BaseModel):
     destination: str | None = None
     start_date: str | None = None
     end_date: str | None = None
+    arrival_time: str | None = Field(default=None, max_length=100)
+    departure_time: str | None = Field(default=None, max_length=100)
     days: int | None = Field(default=None, ge=1, le=30)
     budget: str | None = None
     trip_budget: str | None = Field(default=None, max_length=500)

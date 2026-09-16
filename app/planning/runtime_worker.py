@@ -21,6 +21,8 @@ def snapshot_to_state(snapshot: dict[str, Any]) -> TravelPlanState:
     values = {key: value for key, value in snapshot.items() if key in allowed}
     values.setdefault("travel_start_date", snapshot.get("start_date"))
     values.setdefault("travel_end_date", snapshot.get("end_date"))
+    values.setdefault("travel_arrival_time", snapshot.get("arrival_time"))
+    values.setdefault("travel_departure_time", snapshot.get("departure_time"))
     if not values.get("query"):
         destination = values.get("destination") or snapshot.get("destination") or ""
         days = values.get("days") or snapshot.get("days") or ""
@@ -65,6 +67,10 @@ async def revision_snapshot_to_state(run: dict[str, Any]) -> TravelPlanState:
         destination=checkpoint.get("destination"),
         travel_start_date=checkpoint.get("travel_start_date"),
         travel_end_date=checkpoint.get("travel_end_date"),
+        # 修改任务的状态由父行程的 planner checkpoint 逐字段重建（不是从请求快照继承），
+        # 因此新增的抵达/返程时刻必须在这里显式接上，否则「继续修改」会丢掉它们。
+        travel_arrival_time=checkpoint.get("travel_arrival_time"),
+        travel_departure_time=checkpoint.get("travel_departure_time"),
         days=checkpoint.get("days", 0),
         attraction_preference=checkpoint.get("attraction_preference"),
         food_preference=checkpoint.get("food_preference"),

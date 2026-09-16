@@ -244,6 +244,32 @@ def list_itineraries(user_id: str, conn: sqlite3.Connection) -> list[dict[str, A
     return [dict(r) for r in rows]
 
 
+def delete_itinerary(user_id: str, plan_id: str, conn: sqlite3.Connection) -> bool:
+    """删除该用户的一条行程，返回是否命中。
+
+    `runs.result_itinerary_id` 是指向 itineraries 的真外键且未声明 ON DELETE，
+    而连接始终启用 `PRAGMA foreign_keys=ON`，因此只要有任何 Run 引用该行程，
+    直接删除就会抛 IntegrityError——必须先清空这些引用。
+
+    只删除这一条行程：来源对话、消息、规划任务记录与长期记忆都不受影响；
+    同一趟旅行派生出的其他版本保留，它们的 parent_id 允许悬空。
+    调用方负责开启事务，两条语句必须原子完成。
+    """
+    row = conn.execute(
+        "SELECT user_id FROM itineraries WHERE id=?", (plan_id,)
+    ).fetchone()
+    if row is None or row["user_id"] != user_id:
+        return False
+    conn.execute(
+        "UPDATE runs SET result_itinerary_id=NULL WHERE result_itinerary_id=?",
+        (plan_id,),
+    )
+    cur = conn.execute(
+        "DELETE FROM itineraries WHERE id=? AND user_id=?", (plan_id, user_id)
+    )
+    return cur.rowcount > 0
+
+
 def summarize_plan_for_prompt(plan: dict) -> str:
     """提取行程摘要用于 planner 修改模式的 prompt 注入。"""
     lines = [f"目的地：{plan.get('destination', '')}，{plan.get('start_date', '')} 至 {plan.get('end_date', '')}"]

@@ -720,6 +720,20 @@ img { display: block; }
 }
 .tc-badge.modified { background: rgba(216,148,58,.85); border-color: transparent; color: #1f1607; font-weight: 700; }
 
+/* 卡片右上角：天数标签旁常驻的删除入口。
+   不依赖 hover——触屏没有 hover，删除入口必须始终可达。 */
+.trip-cover .tc-top-actions { display: inline-flex; align-items: center; gap: 10px; }
+.trip-cover .tc-delete {
+  width: 26px; height: 26px; padding: 0; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid rgba(253,250,242,.5); background: rgba(12,14,12,.34);
+  color: #fdfaf2; font-size: .78rem; line-height: 1; letter-spacing: 0;
+  cursor: pointer; backdrop-filter: blur(4px);
+  transition: background .18s, border-color .18s, transform .18s;
+}
+.trip-cover .tc-delete:hover { background: #9c352f; border-color: transparent; transform: scale(1.08); }
+.trip-cover .tc-delete:focus-visible { outline: 2px solid #fdfaf2; outline-offset: 2px; }
+
 .empty-state { text-align: center; padding: 90px 20px; color: var(--ink-3); display: flex; flex-direction: column; align-items: center; gap: 14px; }
 .empty-state .es-title { font-family: var(--font-display); font-size: 1.2rem; font-weight: 700; color: var(--ink-2); }
 .empty-state .es-link { color: var(--accent); font-weight: 700; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; }
@@ -858,6 +872,32 @@ img { display: block; }
   font-weight: 700; cursor: pointer; transition: opacity .2s;
 }
 .confirm-btn:hover { opacity: .88; }
+
+/* ── 通用确认弹窗 ───────────────────────────────── */
+.confirm-summary {
+  background: var(--accent-soft); border-radius: var(--r-md);
+  padding: 14px 16px; margin: 4px 0 18px;
+  border-left: 3px solid var(--accent);
+}
+.confirm-summary .cs-dest {
+  font-family: var(--font-display); font-weight: 900;
+  font-size: 1.05rem; letter-spacing: .06em; color: var(--ink);
+}
+.confirm-summary .cs-meta { font-size: .8rem; color: var(--ink-3); margin-top: 4px; }
+.confirm-warning { font-size: .82rem; color: #9c352f; line-height: 1.7; margin-bottom: 20px; }
+.confirm-error { font-size: .82rem; color: #9c352f; line-height: 1.6; margin-bottom: 16px; }
+.confirm-actions { display: flex; gap: 10px; }
+.confirm-actions button {
+  flex: 1; border-radius: 99px; padding: 10px; font: inherit;
+  font-size: .88rem; cursor: pointer; transition: all .2s;
+}
+.confirm-actions button:disabled { opacity: .55; cursor: not-allowed; }
+.confirm-cancel { border: 1px solid var(--line); background: var(--card-2); color: var(--ink-2); }
+.confirm-cancel:hover:not(:disabled) { border-color: var(--ink-3); color: var(--ink); }
+.confirm-danger { border: none; background: #9c352f; color: #fdfaf2; font-weight: 700; }
+.confirm-danger:hover:not(:disabled) { opacity: .88; }
+.confirm-primary { border: none; background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+.confirm-primary:hover:not(:disabled) { opacity: .88; }
 
 /* 虚拟形象开关 */
 [data-mascot="off"] .mascot,

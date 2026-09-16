@@ -158,6 +158,11 @@ class TravelPlanState(BaseModel):
     destination: Optional[str] = None
     travel_start_date: Optional[date] = None
     travel_end_date: Optional[date] = None
+    # 抵达与返程时刻：用户在对话中给出的原话（可能是「傍晚」这类模糊表述）。
+    # 排程与核验用 helpers 的 arrival_floor / departure_deadline 换算，不在这里归一化，
+    # 以免把系统的保守假设当成用户确认过的事实。
+    travel_arrival_time: Optional[str] = None
+    travel_departure_time: Optional[str] = None
     attraction_preference: Optional[str] = None
     food_preference: Optional[str] = None
     habit_preference: Optional[str] = None

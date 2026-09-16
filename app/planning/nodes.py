@@ -58,7 +58,11 @@ from app.planning.helpers import (
     parse_iso_date,
     restaurant_to_dict,
     spot_location_map,
+    time_window_plan,
     unknown_spots,
+    FIRST_DAY_EVENING_ONLY,
+    FIRST_DAY_NO_SPOTS,
+    LAST_DAY_BEFORE_DEADLINE,
 )
 from app.planning.prompts import (
     INTENT_SYSTEM,
@@ -224,6 +228,73 @@ def _travel_dates_block(state: TravelPlanState) -> str:
     )
 
 
+def _time_window_block(state: TravelPlanState) -> str:
+    """抵达与返程时刻的约束块，供 planner / reviewer / time_check 共用。
+
+    与 `_travel_dates_block` 一样，在三个节点的提示词里注入同一份事实，
+    避免一处受约束、另一处不知情而把路线打回。
+
+    规则由 helpers.time_window_plan 决定（确定性、可单测），这里只负责措辞。
+    用户的「傍晚」保持原样展示，系统另行声明自己按什么下界排程——
+    不把保守假设写回成用户确认过的时刻。
+
+    两处时刻都缺失时返回空串，行为与引入该能力之前完全一致。"""
+    plan = time_window_plan(
+        state.travel_arrival_time, state.travel_departure_time, state.days
+    )
+    if not plan:
+        return ""
+
+    lines: list[str] = []
+    if plan["arrival"]:
+        floor = plan["arrival_floor"]
+        lines.append(
+            f"  抵达表述：{plan['arrival']}"
+            + (f"（首日不得早于 {floor} 开始安排活动）" if floor
+               else "（未能识别为具体时刻，首日不要安排上午与中午的活动）")
+        )
+    if plan["departure"]:
+        deadline = plan["departure_deadline"]
+        lines.append(
+            f"  返程表述：{plan['departure']}"
+            + (f"（末日最后一个景点必须在 {deadline} 之前结束，"
+               f"已按 {plan['departure_edge']} 预留赶车缓冲）" if deadline
+               else "（未能识别为具体时刻，末日不要安排傍晚以后的活动）")
+        )
+
+    window = plan["single_day_window"]
+    if window:
+        lines.append(
+            "  本行程只有 1 天：不区分抵达日与返程日，"
+            f"只在这个可用窗口内安排活动——{window[0]} 至 {window[1]}"
+        )
+    elif plan["single_day_too_narrow"]:
+        lines.append(
+            "  本行程只有 1 天且可用窗口过窄：不要安排任何景点，"
+            "只给出餐饮与提示，不要产出时间冲突的安排"
+        )
+    elif plan["single_day_unknown"]:
+        lines.append("  本行程只有 1 天且时刻无法识别：不要安排有白天开放时间限制的景点")
+
+    if plan["first_day"] == FIRST_DAY_NO_SPOTS:
+        lines.append(
+            "  首日（Day 1）是抵达日，且抵达过晚：首日不要安排任何景点，"
+            "只保留抵达与入住的说明"
+        )
+    elif plan["first_day"] == FIRST_DAY_EVENING_ONLY:
+        lines.append(
+            "  首日（Day 1）是抵达日：不要安排有白天开放时间限制的景点，"
+            "只安排一顿晚餐与一个夜间可玩点"
+        )
+    if plan["last_day"] == LAST_DAY_BEFORE_DEADLINE:
+        lines.append(
+            f"  末日（Day {plan['days']}）是返程日：景点必须不晚于上述时刻结束，"
+            "不要安排会跨过返程时刻的活动"
+        )
+
+    return "\n\n抵达与返程时刻（必须严格遵守，首末两天的安排不得越界）：\n" + "\n".join(lines)
+
+
 def make_planner_node(model_name: str | None):
     llm = build_structured_llm(TravelRoute, model=model_name, temperature=0.3)
 
@@ -289,7 +360,7 @@ def make_planner_node(model_name: str | None):
             f"景点偏好：{state.attraction_preference or '无'}\n"
             f"游玩习惯/节奏：{state.habit_preference or '无'}\n"
             f"本次结构化约束：\n{_constraints_block(state, {'attraction_preference', 'travel_pace', 'schedule_preference', 'companion_context', 'transport_preference', 'accessibility_need', 'budget_style', 'other_travel_preference'})}"
-            f"{_travel_dates_block(state)}"
+            f"{_travel_dates_block(state)}{_time_window_block(state)}"
             f"{weather_block}\n\n"
             f"候选景点池（共 {len(state.pois)} 个）：\n{cand_text}"
             f"{feedback}"
@@ -379,7 +450,7 @@ def make_reviewer_node(model_name: str | None):
             f"目的地：{state.destination}，共 {state.days} 天，每天上限 {state.max_per_day}。\n"
             f"用户游玩习惯：{state.habit_preference or '无'}\n"
             f"本次路线约束：\n{_constraints_block(state, {'travel_pace', 'schedule_preference', 'companion_context', 'transport_preference', 'accessibility_need', 'attraction_preference'})}"
-            f"{_travel_dates_block(state)}\n"
+            f"{_travel_dates_block(state)}{_time_window_block(state)}\n"
             f"{weather_block}\n"
             f"候选景点池：\n{format_spots_for_llm(state.pois, cluster_pois_by_location(state.pois, state.days))}\n\n"
             f"待评审路线：\n{json.dumps(state.route, ensure_ascii=False)}\n\n"
@@ -494,7 +565,7 @@ def make_time_check_node(model_name: str | None):
 
         prompt = (
             f"目的地：{state.destination}"
-            f"{_travel_dates_block(state)}\n\n"
+            f"{_travel_dates_block(state)}{_time_window_block(state)}\n\n"
             f"待核查的景点安排（每行格式：Day N 景点名 安排 start-end | 开放原文：...）：\n"
             f"{route_block}\n\n"
             f"请按 schema 字段顺序输出：先 reasoning 逐景点推理，再 violations 仅写确认违规的项。"

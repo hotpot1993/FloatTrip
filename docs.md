@@ -236,3 +236,42 @@ Pydantic `Field(description=...)` 在 LLM function calling 场景下，会被序
 3. **代码守卫**（不信任 LLM）：落库前用代码计算 `existing` 与输出列表的真实 diff；`change_log` 非空但 diff 为空 → 告警并跳过落库；日志同时打印代码算出的 diff 和 LLM 的 change_log，两者不一致一眼可见。
 
 **沉淀**：凡是 LLM 输出中"叙述性字段"（notes/change_log/说明）与"数据字段"（列表/JSON）并存的场景，都要假设两者可能不一致。叙述字段只能用于展示，**真实状态必须以数据字段为准，且用代码 diff 校验**。字段顺序上，叙述/推理字段排在数据字段之前能显著降低不一致概率。
+
+---
+
+## 问题十三：SQLite 外键静默拦住删除——声明了 REFERENCES 却漏了 ON DELETE（2026-09-16）
+
+**现象**：给历史行程加删除功能，逻辑上就是一条 `DELETE FROM itineraries WHERE id=?`，但任何生成过行程的用户一点删除就 500——只要 `runs` 里有一行引用这份行程，就抛 `IntegrityError: FOREIGN KEY constraint failed`。而 `itineraries` 表的 DDL 里根本看不到这个约束，它在另一张表上。
+
+**根因**：`runs.result_itinerary_id TEXT REFERENCES itineraries(id)` 声明了外键但**没写 `ON DELETE`**（SQLite 默认 `NO ACTION`），同时 `get_conn()` 每次建连都执行 `PRAGMA foreign_keys=ON`。两者叠加，删除被数据库层挡住。更隐蔽的是 **SQLite 的外键默认是关闭的**，所以"随手一试删得掉、真跑起来删不掉"这种差异只在运行期暴露；而 `PRAGMA` 由连接工厂统一设置，只读业务代码时极容易漏看。
+
+**修复（三层）**：
+
+1. **删除前置空引用**：`UPDATE runs SET result_itinerary_id=NULL WHERE result_itinerary_id=?`，再删行程本体。
+2. **原子性**：用 `BEGIN IMMEDIATE` 把"查所有权 → 清空引用 → 删行程"收进同一事务。分成两步且不加锁的话，并发下可能出现"引用已清空，但行程已被别人删掉"，留下指向空行的引用。
+3. **用测试锁死认知**：`test_不先清空引用则外键阻止删除` 直接断言裸删除会抛 `IntegrityError`。这条测试不验证功能，它验证的是"为什么需要这个 helper"——防止后来者觉得那行 `UPDATE` 是多余的而删掉。
+
+**沉淀**：加删除功能前先问"谁引用了它"，而且**不能只看本表 DDL**——引用关系写在别的表上。看到 `REFERENCES` 要顺手确认有没有 `ON DELETE`，并确认连接层有没有开 `PRAGMA foreign_keys`；这个开关的状态决定了同一条 `DELETE` 在开发机上和运行时的行为差异。清理外部引用与删除本体必须同一事务，否则"先清引用、再删本体"的两步操作会在并发下制造新的不一致。
+
+---
+
+## 问题十四：一个新字段要穿过四处白名单——只在一半路径上失灵（2026-09-16）
+
+**现象**：给规划需求单新增「抵达时刻」字段后，首次规划一切正常：用户说「11月7日傍晚抵达」，字段落库、进快照、进提示词。但对同一份行程点「继续修改」，新产出的行程又回到从上午 9:00 开始排——字段像消失了，却没有任何报错。
+
+**根因**：这个字段要穿过四份互相独立、各自声明的清单，而它们的失效方式完全不同：
+
+| 关口 | 位置 | 漏掉的后果 |
+|---|---|---|
+| `durable_fields` | `app/chat/executor.py` | 字段根本不进需求单 |
+| `BriefPatch` | `app/api/runtime_routes.py` | 手动编辑被**静默忽略**（它不是 `extra="forbid"`） |
+| `TravelPlanState` | `app/planning/schemas.py` | 字段不进图状态 |
+| `revision_snapshot_to_state` | `app/planning/runtime_worker.py` | **只有「继续修改」失效** |
+
+前三处漏了会立刻表现为"功能没生效"，第四处最阴：修改任务的状态**不是从请求快照继承的**，而是从父行程的 planner checkpoint 逐字段重建（`revision_snapshot_to_state` 显式列出它要读的每个字段，没列的就取默认值）；`create_run` 对 revision 也只继承一小撮 `memory_*` / 约束类字段，日期压根不在里面。于是首次规划全对、继续修改丢字段，而两条路径共用同一个界面、同一个按钮。
+
+**修复**：把两个字段同时补进四处，并为修改流程单独写测试（`tests/test_time_window.py::TestRevisionInheritance`），断言字段能从父行程的 checkpoint 一路进到图状态。
+
+**沉淀**：给这个项目加新的行程字段时，**不要按"字段名相同就能自动流转"来推理**。它至少经过四份白名单，其中 revision 那条是从数据库里的 checkpoint 重建、而不是从请求快照透传。"首次规划正常"不能证明字段接好了——必须按入口分别验证：对话补丁、需求单手动编辑、提交后的首次规划、继续修改。
+
+**同一类问题的另一面**：前端要判断「这是不是一个具体时刻」以决定标不标"未提供具体时刻"，后端也要判断以决定用不用保守下界。两边各写一套正则时，前端写成"必须以数字开头"，后端用的是 `search`，"下午3点"于是被前端标成"未提供具体时刻"、后端却解析成 15:00。这类跨层判断重复实现时，必须用同一批样例交叉验证，否则用户会看到自相矛盾的界面。

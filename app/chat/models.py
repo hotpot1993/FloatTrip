@@ -28,6 +28,8 @@ class PlanningBriefPatch(_StrictModel):
     destination: str | None = None
     start_date: str | None = None
     end_date: str | None = None
+    arrival_time: str | None = None
+    departure_time: str | None = None
     days: int | None = Field(default=None, ge=1, le=30)
     budget: str | None = None
     trip_budget: str | None = None
@@ -43,6 +45,8 @@ class PlanningBriefPatch(_StrictModel):
         "destination",
         "start_date",
         "end_date",
+        "arrival_time",
+        "departure_time",
         "budget",
         "trip_budget",
         "attraction_preference",

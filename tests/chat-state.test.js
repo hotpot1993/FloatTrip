@@ -449,6 +449,43 @@ test("builds a ready brief summary with explicit defaults", () => {
   assert.deepEqual(view.preferences, [["餐饮", "清淡"]]);
 });
 
+test("shows arrival and departure as the user phrased them, and marks fuzzy ones", () => {
+  const view = ChatState.briefViewModel({
+    status: "ready",
+    data: {
+      destination: "云南",
+      start_date: "2026-11-07",
+      end_date: "2026-11-10",
+      arrival_time: "11月7日傍晚抵达",
+      departure_time: "18:30",
+    },
+  });
+  // 用户说的「傍晚」必须原样展示，同时标明不是具体钟点——后端据此采用保守下界
+  assert.equal(view.arrivalLabel, "11月7日傍晚抵达（未提供具体时刻）");
+  assert.equal(view.departureLabel, "18:30");
+  assert.equal(view.timeWindowLabel, "抵达 11月7日傍晚抵达（未提供具体时刻） · 返程 18:30");
+});
+
+test("marks a missing arrival and departure time as not provided", () => {
+  const view = ChatState.briefViewModel({
+    status: "ready",
+    data: { destination: "南京", start_date: "2026-11-07", end_date: "2026-11-10" },
+  });
+  assert.equal(view.arrivalLabel, "未提供");
+  assert.equal(view.departureLabel, "未提供");
+  assert.equal(view.timeWindowLabel, "未提供");
+});
+
+test("treats a bare period word as not a concrete clock time", () => {
+  assert.equal(ChatState.briefViewModel({ data: { arrival_time: "傍晚" } }).arrivalLabel,
+    "傍晚（未提供具体时刻）");
+  assert.equal(ChatState.briefViewModel({ data: { arrival_time: "17:00" } }).arrivalLabel, "17:00");
+  assert.equal(ChatState.briefViewModel({ data: { arrival_time: "下午3点" } }).arrivalLabel, "下午3点");
+  // 只填了一头时，另一头仍要显式说明未提供
+  assert.equal(ChatState.briefViewModel({ data: { departure_time: "15:00" } }).timeWindowLabel,
+    "抵达 未提供 · 返程 15:00");
+});
+
 test("describes every run terminal and non-terminal state with an action", () => {
   for (const status of ["queued", "running", "waiting_user", "succeeded", "failed", "cancelled"]) {
     assert.ok(ChatState.RUN_PRESENTATIONS[status].label);

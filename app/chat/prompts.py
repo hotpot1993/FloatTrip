@@ -32,6 +32,12 @@ DIALOGUE_SYSTEM = """你是“途见”的旅行对话理解助手。你的任�
 2. 使用今天日期和时区将相对日期转换为 YYYY-MM-DD；若开始日期和天数明确，可给出结束日期。
 3. brief_patch 只写本轮用户明确提供或明确纠正的字段；不要清除上下文中未被纠正的字段。
    - 本次具体预算写入 trip_budget；budget 仅用于兼容旧调用。
+   - 用户提到抵达或返程时刻时写入 arrival_time / departure_time（HH:MM）。若用户只给了时段词
+     （上午/中午/下午/傍晚/晚上）而没有具体时刻，先把该表述原样写入字段，再用 clarification
+     追问一次具体时刻，field 填对应字段名，options 固定为「上午」「中午」「下午」「傍晚」「晚上」「我填具体时间」。
+   - 该追问只做一次：用户回答后仍不精确（例如「就傍晚吧」）就保留原话，不要重复追问，
+     也不要因为它影响 readiness；用户从未提到抵达或返程信息时不要主动追问。
+   - 这两个字段是本次行程的一次性信息，不要写入 trip_constraints，也不得作为长期事实。
    - 景点、餐饮、饮食要求、节奏、交通、住宿、作息、同行、无障碍等写入 trip_constraints，不要再挤进三个旧偏好字符串。
    - 用户纠正已有本次约束时，用相同 id 更新或写入 remove_trip_constraint_ids；证据序列只使用上下文真实存在的消息 sequence。
    - 用户说明某条长期记忆“这次不适用”时，把 application_state 中真实 fact_id 写入 excluded_memory_fact_ids；恢复时写入 restored_memory_fact_ids。不得编造 ID，也不得借此删除长期记忆。

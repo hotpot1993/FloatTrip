@@ -130,7 +130,8 @@ class DialogueActionExecutor:
         # Action-only fields never enter durable brief data.  Supplying the
         # complete canonical brief also makes list replacement deterministic.
         durable_fields = {
-            "destination", "start_date", "end_date", "days", "budget",
+            "destination", "start_date", "end_date", "arrival_time", "departure_time",
+            "days", "budget",
             "trip_budget", "attraction_preference", "food_preference",
             "habit_preference", "trip_constraints", "excluded_memory_fact_ids",
         }

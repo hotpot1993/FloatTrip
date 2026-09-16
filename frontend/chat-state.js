@@ -169,6 +169,21 @@
     };
   }
 
+  // 抵达与返程时刻可能是模糊表述（「傍晚」）。摘要必须原样展示用户说的话，
+  // 同时标明它不是具体钟点——后端据此采用保守下界，用户看到的是同一个事实。
+  // 匹配范围必须与后端 helpers._parse_clock 一致：它用的是 search，
+  // 所以「下午3点」在两端都算具体时刻，不能只认以数字开头的写法。
+  function isConcreteTime(value) {
+    const text = (value || "").trim();
+    return /\d{1,2}[:：]\d{2}/.test(text) || /\d{1,2}\s*[点时]/.test(text);
+  }
+
+  function timeWindowPart(value) {
+    const text = (value || "").trim();
+    if (!text) return "未提供";
+    return isConcreteTime(text) ? text : `${text}（未提供具体时刻）`;
+  }
+
   function briefViewModel(brief) {
     const data = brief?.data || {};
     const missingLabels = {
@@ -196,11 +211,18 @@
         if (value && !preferences.some(([, existing]) => existing === value)) preferences.push([label, value]);
       });
     if (data.trip_budget || data.budget) preferences.unshift(["本次预算", data.trip_budget || data.budget]);
+    const arrivalLabel = timeWindowPart(data.arrival_time);
+    const departureLabel = timeWindowPart(data.departure_time);
     return {
       destination: data.destination || "还没决定",
       dateLabel: data.start_date && data.end_date
         ? `${data.start_date} — ${data.end_date}`
         : data.days ? `${data.days} 天 · 日期待定` : "日期待补充",
+      arrivalLabel,
+      departureLabel,
+      timeWindowLabel: arrivalLabel === "未提供" && departureLabel === "未提供"
+        ? "未提供"
+        : `抵达 ${arrivalLabel} · 返程 ${departureLabel}`,
       preferences,
       usesDefaults: brief?.status === "ready"
         && !(data.trip_constraints || []).length
