@@ -142,9 +142,11 @@ function ChatPage({ currentUsername, onRequestLogin, onOpenPlan }) {
   const abortsRef = React.useRef({});
   const activeIdRef = React.useRef(null);
   const runNodesRef = React.useRef({});
+  const questionNodesRef = React.useRef({});
   const composerRef = React.useRef(null);
   const errorRef = React.useRef(null);
   const waitingRunsRef = React.useRef(new Set());
+  const questionKeyRef = React.useRef("");
   const activityItems = ChatState.activityItems(state);
   const runList = Object.values(state.runs).sort(
     (a, b) => String(a.created_at || "").localeCompare(String(b.created_at || ""))
@@ -155,6 +157,10 @@ function ChatPage({ currentUsername, onRequestLogin, onOpenPlan }) {
   const activeConversation = conversations.find(item => item.id === activeId) || null;
   const conversationArchived = activeConversation?.status === "archived";
   const hasConversationMessages = Object.keys(state.messages || {}).length > 0;
+  const currentQuestionItem = activityItems.find(item => item.type === "brief_question") || null;
+  const currentQuestionKey = currentQuestionItem
+    ? currentQuestionItem.key
+    : "";
 
   const sidebarConversations = conversations.map(item => {
     if (item.id !== activeId || item.status === "archived") return item;
@@ -333,10 +339,13 @@ function ChatPage({ currentUsername, onRequestLogin, onOpenPlan }) {
     return () => observer.disconnect();
   }, [activityItems.map(item => item.key).join("|")]);
 
-  const send = async () => {
-    const content = draft.trim();
+  const send = async explicitContent => {
+    // 提问卡片的自由输入框复用这条通道。它不是结构化回答：自然语言必须
+    // 经过对话理解才能落成字段（见 ADR 0002）。
+    const fromComposer = typeof explicitContent !== "string";
+    const content = (fromComposer ? draft : explicitContent).trim();
     if (!content) return;
-    if (composerTarget?.mode === "resume") {
+    if (fromComposer && composerTarget?.mode === "resume") {
       const run = composerTarget.run;
       const interaction = run.pending_interaction;
       if (!interaction?.interaction_id) return;
@@ -363,10 +372,12 @@ function ChatPage({ currentUsername, onRequestLogin, onOpenPlan }) {
       activeIdRef.current = conversationId;
       setActiveId(conversationId);
     }
-    setDraft("");
+    if (fromComposer) setDraft("");
     setError("");
     try {
-      const context = composerTarget?.mode === "revision"
+      // 只有输入框自己发出的消息才该带上输入框的目标上下文；提问卡片的
+      // 自由输入属于当前那一题，不能被「正在修改某份行程」的绑定带走。
+      const context = fromComposer && composerTarget?.mode === "revision"
         ? { related_itinerary_id: composerTarget.itineraryId }
         : {};
       const result = await submitConversationMessage(conversationId, content, context);
@@ -381,10 +392,15 @@ function ChatPage({ currentUsername, onRequestLogin, onOpenPlan }) {
         return next;
       });
       subscribeRun(result.run);
-      setComposerTarget(null);
+      if (fromComposer) setComposerTarget(null);
     } catch (e) {
-      setDraft(content);
       setError(e.message || "发送失败");
+      if (fromComposer) {
+        setDraft(content);
+        return;
+      }
+      // 提问卡片要能显示自己的失败状态，因此显式发送这一路向上抛。
+      throw e;
     }
   };
 
@@ -393,6 +409,14 @@ function ChatPage({ currentUsername, onRequestLogin, onOpenPlan }) {
       ...previous,
       briefs: { ...previous.briefs, [brief.id]: brief },
     }));
+  };
+
+  // 候选项与日期范围走结构化接口：不经过对话理解，也不产生对话消息。
+  // 响应体就是唯一的结果来源（该接口刻意不广播事件）。
+  const answerQuestion = async (question, value) => {
+    const updated = await answerPlanningBriefQuestion(question.briefId, question.field, value);
+    refreshBrief(updated);
+    return updated;
   };
 
   const submitBrief = async brief => {
@@ -495,6 +519,28 @@ function ChatPage({ currentUsername, onRequestLogin, onOpenPlan }) {
     if (node) runNodesRef.current[runId] = node;
     else delete runNodesRef.current[runId];
   };
+
+  const registerQuestionNode = (key, node) => {
+    if (node) questionNodesRef.current[key] = node;
+    else delete questionNodesRef.current[key];
+  };
+
+  const focusQuestion = key => {
+    const node = questionNodesRef.current[key];
+    if (!node) return;
+    node.scrollIntoView({ behavior: "smooth", block: "center" });
+    window.setTimeout(() => node.focus(), 350);
+  };
+
+  // 新提问出现时滚过去并聚焦。聊天流是滚动容器，卡片很容易落在视口外，
+  // 而键盘与读屏用户不会自己发现它。这里刻意不再叠加 live region 播报，
+  // 否则焦点移动与播报会念同一件事两遍。
+  React.useEffect(() => {
+    const previous = questionKeyRef.current;
+    questionKeyRef.current = currentQuestionKey;
+    if (!currentQuestionKey || currentQuestionKey === previous) return;
+    window.setTimeout(() => focusQuestion(currentQuestionKey), 0);
+  }, [currentQuestionKey]);
 
   const offscreenRuns = observerReady
     ? activeRuns.filter(run => !visibleRunIds.has(run.id))
@@ -601,6 +647,9 @@ function ChatPage({ currentUsername, onRequestLogin, onOpenPlan }) {
               setComposerTarget({ mode: "resume", run, label: `${run.request_snapshot?.destination || "规划任务"} · 回复` });
               setDraft("");
             }}
+            onQuestionAnswer={answerQuestion}
+            onQuestionText={text => send(text)}
+            registerQuestionNode={registerQuestionNode}
             registerRunNode={registerRunNode}
           />
         </div>
@@ -665,11 +714,21 @@ function ActivityTimeline({
   items, currentUsername,
   onBriefUpdate, onBriefSubmit, onBriefDiscard,
   onRunCancel, onRunRetry, onRunOpen, onRunModify, onRunReply, onChatRetry,
-  registerRunNode,
+  onQuestionAnswer, onQuestionText, registerQuestionNode, registerRunNode,
 }) {
   return items.map(item => {
     if (item.type === "message") {
       const message = item.entity;
+      if (message.role === "assistant" && item.clarification?.options?.length) {
+        return (
+          <ClarificationCard
+            key={item.key}
+            message={message}
+            clarification={item.clarification}
+            onChoose={onQuestionText}
+          />
+        );
+      }
       return (
         <article key={item.key} className={`chat-message ${message.role}`} aria-label={message.role === "user" ? "你的消息" : "途途的回复"}>
           <div className="chat-avatar" aria-hidden="true">{message.role === "user" ? currentUsername?.slice(-1) : "途"}</div>
@@ -680,6 +739,20 @@ function ActivityTimeline({
             {message.streaming && <span className="typing-caret" aria-hidden="true" />}
           </div>
         </article>
+      );
+    }
+    if (item.type === "brief_record") {
+      return <BriefRecordLine key={item.key} record={item.entity} />;
+    }
+    if (item.type === "brief_question") {
+      return (
+        <QuestionCard
+          key={item.key}
+          question={item.entity}
+          onAnswer={onQuestionAnswer}
+          onFreeText={onQuestionText}
+          refNode={node => registerQuestionNode(item.key, node)}
+        />
       );
     }
     if (item.type === "brief") {
@@ -704,6 +777,19 @@ function ActivityTimeline({
             <span className="chat-thinking-dots" aria-hidden="true"><i /><i /><i /></span>
           </div>
         </article>
+      );
+    }
+    if (item.type === "quota_warning") {
+      const warning = item.entity.quota_warning || {};
+      return (
+        <p key={item.key} className="quota-warning" role="status">
+          <span aria-hidden="true">⚠️</span>
+          <span>
+            {warning.message
+              || `高德配额已用 ${warning.used}/${warning.limit}，接近上限。`}
+            本地计数为估算值，可在设置里录入控制台读数对账。
+          </span>
+        </p>
       );
     }
     if (item.type === "chat_failure") {
@@ -767,11 +853,183 @@ function ChatMessageContent({ content }) {
   );
 }
 
+function BriefRecordLine({ record }) {
+  return (
+    <div className={`brief-record ${record.skipped ? "skipped" : ""}`}>
+      <span className="brief-record-mark" aria-hidden="true">{record.skipped ? "–" : "✓"}</span>
+      <span className="brief-record-label">{record.label}</span>
+      <strong>{record.skipped ? "已跳过" : (record.value || "已记录")}</strong>
+    </div>
+  );
+}
+
+// 澄清（目标不唯一、确实无法理解）与字段提问共用同一种卡片外观，区别只在
+// 回答方式：澄清没有对应字段，所以选项点击等价于把这句话作为普通消息发出。
+function ClarificationCard({ message, clarification, onChoose }) {
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const options = clarification.options || [];
+  const choose = async option => {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await onChoose(option);
+    } catch (e) {
+      setError(e.message || "发送失败，请重试");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <section className="question-card clarification-card" aria-label="需要你确认一件事">
+      <div className="question-head">
+        <div>
+          <span>TRIP QUESTIONS</span>
+          <h3>需要你先定一下</h3>
+        </div>
+      </div>
+      <ChatMessageContent content={message.content} />
+      <div className="choice-input" role="group" aria-label={message.content}>
+        {options.map(option => (
+          <button type="button" key={option} className="choice-chip" disabled={busy}
+            onClick={() => choose(option)}>{option}</button>
+        ))}
+      </div>
+      {error && <p className="question-error" role="alert">{error}</p>}
+      <div className="question-actions">
+        <small>选择后会作为一条消息发出去；也可以直接在下面打字。</small>
+      </div>
+    </section>
+  );
+}
+
+function QuestionCard({ question, onAnswer, onFreeText, refNode }) {
+  const [busy, setBusy] = React.useState("");
+  const [error, setError] = React.useState("");
+  const [text, setText] = React.useState("");
+  const [startDate, setStartDate] = React.useState("");
+  const [endDate, setEndDate] = React.useState("");
+  const [selected, setSelected] = React.useState([]);
+  const options = question.options || [];
+  const kind = question.kind;
+  const total = Number(question.total || 0);
+  const answered = Math.max(0, total - Number(question.remaining || 0));
+  const heading = total ? `${question.label} · 第 ${answered + 1} / ${total} 项` : question.label;
+
+  const submit = async value => {
+    if (busy) return;
+    setBusy("answer");
+    setError("");
+    try {
+      await onAnswer(question, value);
+      setText("");
+      setSelected([]);
+    } catch (e) {
+      setError(e.message || "提交失败，请重试");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const submitDates = () => {
+    if (!startDate || !endDate) { setError("请选择开始和结束日期"); return; }
+    if (endDate < startDate) { setError("结束日期不能早于开始日期"); return; }
+    submit({ start_date: startDate, end_date: endDate });
+  };
+
+  // 自由输入不是结构化回答：它作为一条普通消息发出，由对话理解写成字段。
+  const sendFreeText = async () => {
+    const content = text.trim();
+    if (!content || busy) return;
+    setBusy("text");
+    setError("");
+    try {
+      await onFreeText(content);
+      setText("");
+    } catch (e) {
+      setError(e.message || "发送失败，请重试");
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <section ref={refNode} data-question-field={question.field} tabIndex="-1"
+      className={`question-card kind-${kind}`} aria-labelledby={`question-title-${question.briefId}`}>
+      <div className="question-head">
+        <div>
+          <span>TRIP QUESTIONS</span>
+          <h3 id={`question-title-${question.briefId}`}>{heading}</h3>
+        </div>
+        {question.progress && <em>{question.progress}</em>}
+      </div>
+      <p className="question-body">{question.question}</p>
+      {kind === "date_range" ? (
+        <div className="question-dates">
+          <label>出发日期<input type="date" value={startDate} disabled={!!busy}
+            onChange={e => setStartDate(e.target.value)} /></label>
+          <span aria-hidden="true">→</span>
+          <label>返回日期<input type="date" value={endDate} disabled={!!busy}
+            onChange={e => setEndDate(e.target.value)} /></label>
+          <button className="run-primary" disabled={!!busy} onClick={submitDates}>
+            {busy === "answer" ? "提交中…" : "就用这个日期"}
+          </button>
+        </div>
+      ) : kind === "single_choice" ? (
+        <div className="choice-input" role="group" aria-label={question.question}>
+          {options.map(option => (
+            <button type="button" key={option} className="choice-chip" disabled={!!busy}
+              onClick={() => submit(option)}>{option}</button>
+          ))}
+        </div>
+      ) : kind === "multi_choice" ? (
+        <div className="choice-input" role="group" aria-label={question.question}>
+          {options.map(option => (
+            <label key={option} className={`choice-chip ${selected.includes(option) ? "selected" : ""}`}>
+              <input type="checkbox" checked={selected.includes(option)} disabled={!!busy}
+                onChange={() => setSelected(values => values.includes(option)
+                  ? values.filter(item => item !== option)
+                  : [...values, option])} />
+              {option}
+            </label>
+          ))}
+          <button type="button" className="run-primary" disabled={!!busy || !selected.length}
+            onClick={() => submit(selected)}>就这些</button>
+        </div>
+      ) : null}
+      <div className="question-free">
+        <input value={text} disabled={!!busy} placeholder={question.hint || "也可以直接说"}
+          aria-label={`用一句话回答：${question.question}`}
+          onChange={e => setText(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendFreeText(); }
+          }} />
+        <button disabled={!text.trim() || !!busy} onClick={sendFreeText}>
+          {busy === "text" ? "发送中…" : "直接说"}
+        </button>
+      </div>
+      {error && <p className="question-error" role="alert">{error}</p>}
+      <div className="question-actions">
+        {question.optional && (
+          <button className="question-skip" disabled={!!busy} onClick={() => submit(null)}>
+            还不确定，先跳过
+          </button>
+        )}
+        <small>点候选项直接记录；想用自己的说法，就在上面写一句。</small>
+      </div>
+    </section>
+  );
+}
+
 function PlanningBriefCard({ brief, onUpdate, onSubmit, onDiscard }) {
   const [editing, setEditing] = React.useState(false);
   const [form, setForm] = React.useState(brief.data || {});
   const [busy, setBusy] = React.useState("");
   const [localError, setLocalError] = React.useState("");
+  // 清除需求不可撤销，因此必须二次确认并说明结果——点一下卡片就静默消失
+  // 与「停止正在运行的任务」也容易混淆。
+  const [confirmingDiscard, setConfirmingDiscard] = React.useState(false);
   const editable = ["collecting", "ready"].includes(brief.status);
   React.useEffect(() => setForm(brief.data || {}), [brief.data]);
   const constraints = form.trip_constraints || [];
@@ -969,11 +1227,30 @@ function PlanningBriefCard({ brief, onUpdate, onSubmit, onDiscard }) {
         </div>
       )}
       {localError && <p className="brief-error" role="alert">{localError}</p>}
+      {confirmingDiscard && (
+        <ConfirmModal
+          title="清除这份需求？"
+          message="这份需求摘要会被移除，且不会创建规划任务。已经发生的对话不受影响。"
+          confirmLabel="清除需求"
+          danger
+          busy={busy === "discard"}
+          onCancel={() => setConfirmingDiscard(false)}
+          onConfirm={() => runAction("discard", async () => {
+            await onDiscard();
+            setConfirmingDiscard(false);
+          })}
+        >
+          <div className="confirm-summary">
+            <strong className="cs-dest">{view.destination}</strong>
+            <span className="cs-meta">{view.dateLabel}</span>
+          </div>
+        </ConfirmModal>
+      )}
       <div className="brief-actions">
         {editable ? (
           <>
             <button className="brief-discard" disabled={!!busy}
-              onClick={() => runAction("discard", onDiscard)}>
+              onClick={() => setConfirmingDiscard(true)}>
               {busy === "discard" ? "清除中…" : "清除这份需求"}
             </button>
             <button className="brief-submit" disabled={(!editing && brief.status !== "ready") || !!busy}

@@ -231,6 +231,17 @@ def init_db(path: str | Path | None = None) -> None:
                 ON memory_facts(user_id,scope_type,normalized_value);
             CREATE INDEX IF NOT EXISTS idx_memory_jobs_claim
                 ON memory_extraction_jobs(status,next_attempt_at,created_at);
+
+            CREATE TABLE IF NOT EXISTS amap_quota_usage (
+                bucket                TEXT    NOT NULL,
+                month                 TEXT    NOT NULL,
+                counter_calls         INTEGER NOT NULL DEFAULT 0,
+                counter_baseline      INTEGER NOT NULL DEFAULT 0,
+                counter_at_reconcile  INTEGER NOT NULL DEFAULT 0,
+                warning_sent_at       TEXT,
+                updated_at            TEXT    NOT NULL,
+                PRIMARY KEY (bucket, month)
+            );
         """)
         # 对已有数据库做迁移保护
         try:
@@ -265,6 +276,13 @@ def init_db(path: str | Path | None = None) -> None:
             "WHERE julianday(created_at) < julianday('now', '-30 days')"
         )
         _migrate_legacy_profiles(conn)
+    # 配额用量保留 13 个月：够跨年对账，又不会无限增长。
+    # 刻意复用 amap_quota_store 的清理实现，而不是在这里写一份 SQL 日期运算——
+    # 领域层的月份边界固定在 Asia/Shanghai，SQL 的 strftime('now') 用的是 UTC，
+    # 两份时间基准会让「哪些月份算过期」互相矛盾。
+    from app.core.amap_quota_store import delete_old_months
+
+    delete_old_months(13, db_path=db_path)
 
 
 def _memory_fingerprint(

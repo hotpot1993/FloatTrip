@@ -36,9 +36,11 @@ data/langgraph-checkpoints.db-wal
 travel_plans.db
 itineraries.db
 .gitignore
-awesomefrontend/途见·新建行程页（离线版）.html
+awesomefrontend/閫旇路鏂板缓琛岀▼椤碉紙绂荤嚎鐗堬級.html
 awesomefrontend/sky-bg.png
 data/app.db
+data/app.db-shm
+data/app.db-wal
 demos/demo-home.html
 demos/demo-loading.html
 demos/demo-result.html

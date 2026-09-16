@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from app.core.database import get_conn
-from app.core.planning_brief import required_brief_fields
+from app.core.planning_brief import (
+    collection_complete,
+    declined_fields,
+    next_question,
+    questioned_fields,
+    required_brief_fields,
+)
 from app.core.planning_constraints import build_brief_projection, normalize_brief_data
 from app.core.travel_memory import (
     ArchivedConversationError,
@@ -386,7 +392,18 @@ class PlanningBriefRepository:
             match_status=result.get("memory_match_status", "none"),
             error_code=result.get("memory_match_error_code"),
         )
-        return {**result, **view}
+        # 提问完全由 data 现算，不落库：这样零迁移，且刷新前后必然一致。
+        # 「收集已完成」只影响界面是否展示需求摘要，与 ready / 可提交性是
+        # 两件独立的事，因此不写进 missing_fields。
+        data = view["data"]
+        return {
+            **result,
+            **view,
+            "declined_fields": declined_fields(data),
+            "answered_fields": questioned_fields(data),
+            "collected": collection_complete(data),
+            "question": next_question(data),
+        }
 
     def get(self, user_id: str, brief_id: str) -> dict[str, Any]:
         with get_conn(self.db_path) as conn:

@@ -1981,3 +1981,64 @@ img { display: block; }
   .chat-composer-wrap{left:14px;right:14px}.chat-composer{padding-left:14px}.composer-hint{padding:9px 12px 11px}.chat-empty-prompts{grid-template-columns:1fr}.chat-empty{padding:20px 0}.chat-empty strong{font-size:2rem}
 }
 @media(prefers-reduced-motion:reduce){.chat-message,.chat-thinking,.brief-card,.run-card,.chat-thinking-dots i{animation:none}.chat-feed{scroll-behavior:auto}.chat-sidebar{transition:none}}
+
+/* ── 字段提问：已记录行与提问卡片 ─────────────────────────
+   提问由服务端逐项下发，已处理的字段折叠成一行，因此这两类元素都要比
+   需求摘要卡轻，避免四五轮问答之后聊天流被卡片淹没。 */
+.brief-record{align-self:center;width:min(760px,96%);display:flex;align-items:center;gap:10px;padding:7px 14px;border:1px dashed var(--line);border-radius:12px;background:color-mix(in srgb,var(--surface) 60%,transparent);font-size:.86rem;color:var(--text-2)}
+.brief-record-mark{width:18px;height:18px;flex-shrink:0;display:grid;place-items:center;border-radius:50%;background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent);font-size:.72rem}
+.brief-record-label{color:var(--text-3)}
+.brief-record strong{color:var(--text);font-weight:600}
+.brief-record.skipped{opacity:.72}
+.brief-record.skipped .brief-record-mark{background:color-mix(in srgb,var(--line-2) 45%,transparent);color:var(--text-3)}
+
+.question-card{position:relative;align-self:center;width:min(760px,96%);display:flex;flex-direction:column;gap:12px;padding:18px 20px;border:1px solid color-mix(in srgb,var(--accent) 34%,var(--line));border-radius:18px;background:var(--surface);box-shadow:0 10px 30px -22px color-mix(in srgb,var(--accent) 60%,transparent);animation:card-in .28s ease-out}
+.question-card:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.question-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.question-head span{display:block;font-size:.66rem;letter-spacing:.16em;color:var(--accent)}
+.question-head h3{margin:3px 0 0;font-size:1.02rem;font-weight:700}
+.question-head em{flex-shrink:0;padding:3px 9px;border-radius:999px;background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent);font-size:.74rem;font-style:normal}
+.question-body{margin:0;font-size:.92rem;color:var(--text)}
+.question-dates{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
+.question-dates label{display:flex;flex-direction:column;gap:5px;font-size:.76rem;color:var(--text-3)}
+.question-dates input{padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text);font:inherit}
+.choice-chip{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border:1px solid var(--line);border-radius:999px;background:var(--bg);color:var(--text);font:inherit;font-size:.86rem;cursor:pointer;transition:border-color .15s,background .15s}
+.choice-chip:hover:not(:disabled){border-color:var(--accent)}
+.choice-chip:disabled{opacity:.55;cursor:default}
+.choice-chip.selected{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.choice-chip input{position:absolute;opacity:0;pointer-events:none}
+.question-card .choice-input{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.question-card .run-primary{align-self:flex-start}
+.question-free{display:flex;gap:8px}
+.question-free input{flex:1;min-width:0;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text);font:inherit}
+.question-free button{padding:0 16px;border:1px solid var(--line-2);border-radius:10px;background:transparent;color:var(--text);font:inherit;cursor:pointer}
+.question-free button:disabled{opacity:.5;cursor:default}
+.question-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.question-actions small{color:var(--text-3);font-size:.76rem}
+.question-skip{padding:6px 12px;border:1px solid var(--line);border-radius:999px;background:transparent;color:var(--text-2);font:inherit;font-size:.82rem;cursor:pointer}
+.question-skip:disabled{opacity:.5;cursor:default}
+.question-error{margin:0;color:var(--danger,#9c352f);font-size:.84rem}
+
+@media(max-width:760px){
+  .question-card{padding:15px 14px}
+  .question-dates{flex-direction:column;align-items:stretch}
+  .question-dates>span{display:none}
+  .question-free{flex-direction:column}
+  .question-free button{padding:9px 16px}
+}
+/* ���� �ߵ����Ԥ�� ������������������������������������������������������������������������������������������
+   һ�� Run ֻ�������һ��Ԥ������������֮ǰ���������ƣ�������ʾ��
+   ����ʧ�ܡ����û��Կɼ����滮��ֻ�ǽӽ���������ˡ� */
+.quota-warning {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  margin: 0.5rem 0;
+  padding: 0.6rem 0.8rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--warn-border, rgba(214, 158, 46, 0.35));
+  background: var(--warn-bg, rgba(214, 158, 46, 0.08));
+  color: var(--text-2, #6b6257);
+  font-size: 0.82rem;
+  line-height: 1.55;
+}

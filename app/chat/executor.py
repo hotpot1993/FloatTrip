@@ -12,7 +12,13 @@ from datetime import date
 from typing import TYPE_CHECKING, Any
 
 from app.chat.models import DialogueDecision, PlanningBriefPatch
-from app.core.planning_brief import required_brief_fields
+from app.core.planning_brief import (
+    DECLINED_FIELDS_KEY,
+    DURABLE_BRIEF_FIELDS,
+    auto_decline_questions,
+    declined_fields,
+    required_brief_fields,
+)
 from app.runtime.models import RunKind, RunStatus
 from app.runtime.repositories import OwnedResourceNotFound
 
@@ -31,6 +37,21 @@ class DialogueActionExecutor:
         reply = decision.clarification.question if decision.clarification else decision.reply
         result: dict[str, Any] = {}
 
+        if decision.clarification:
+            # 澄清的候选项只随本轮事件下发、不落库：问题文本本身已经作为助手
+            # 消息持久化，因此刷新后卡片退化成普通气泡也不会丢信息。
+            await self.service.manager.publish(
+                run["id"],
+                "custom",
+                {
+                    "kind": "chat.clarification",
+                    "field": decision.clarification.field,
+                    "question": decision.clarification.question,
+                    "options": list(decision.clarification.options),
+                },
+                durable=False,
+            )
+
         if decision.intent in {"create_plan", "update_brief"}:
             brief, error = await self._apply_brief(run, decision)
             if error:
@@ -38,16 +59,14 @@ class DialogueActionExecutor:
             elif brief:
                 result["brief_id"] = brief["id"]
         elif decision.intent == "confirm_plan":
-            submitted, error = await self._confirm_plan(run)
+            brief, created, error = await self._confirm_plan(run)
+            if brief:
+                result["brief_id"] = brief["id"]
             if error:
                 reply = error
-            elif submitted:
-                brief, planning_run = submitted
-                result.update(
-                    brief_id=brief["id"],
-                    created_run_id=planning_run["id"],
-                )
-                await self._publish_created_run(run, planning_run)
+            elif created:
+                result["created_run_id"] = created["id"]
+                await self._publish_created_run(run, created)
         elif decision.intent == "modify_itinerary":
             revision, error = await self._create_revision(run, decision)
             if error:
@@ -85,8 +104,8 @@ class DialogueActionExecutor:
         self, run: dict[str, Any], decision: DialogueDecision
     ) -> tuple[dict[str, Any] | None, str | None]:
         patch = decision.brief_patch.model_dump(exclude_none=True, exclude_unset=True)
-        if not patch:
-            return None, "我还需要一点旅行信息，才能继续整理这趟行程。"
+        # 空 patch 不再被拒绝：用户只说了「我想出去玩」时也必须开出一张需求单，
+        # 否则最需要被逐项问清楚的场景永远进不了提问流程。第一项会问目的地。
         if not self._patch_dates_valid(patch):
             return None, "日期范围看起来不正确，请补充有效的开始和结束日期。"
         active = await asyncio.to_thread(
@@ -118,6 +137,16 @@ class DialogueActionExecutor:
         excluded = set(((active or {}).get("data") or {}).get("excluded_memory_fact_ids") or [])
         excluded.update(patch.pop("excluded_memory_fact_ids", []) or [])
         excluded.difference_update(patch.pop("restored_memory_fact_ids", []) or [])
+        # 跳过是累加的：语言模型只应补充本轮新跳过的字段，不能抹掉用户之前
+        # 已经明确跳过的项。declined_fields() 会丢弃必填字段，因此即便模型写错
+        # 也不会让需求单永远问不完。
+        declined = set(declined_fields((active or {}).get("data") or {}))
+        declined.update(str(value) for value in (patch.pop(DECLINED_FIELDS_KEY, None) or []))
+        if declined:
+            combined[DECLINED_FIELDS_KEY] = declined_fields(
+                {DECLINED_FIELDS_KEY: list(declined)}
+            )
+            patch[DECLINED_FIELDS_KEY] = combined[DECLINED_FIELDS_KEY]
         if constraints_by_id or existing_constraints:
             combined["trip_constraints"] = list(constraints_by_id.values())
             patch["trip_constraints"] = combined["trip_constraints"]
@@ -129,19 +158,21 @@ class DialogueActionExecutor:
         self._normalize_days(combined)
         # Action-only fields never enter durable brief data.  Supplying the
         # complete canonical brief also makes list replacement deterministic.
-        durable_fields = {
-            "destination", "start_date", "end_date", "arrival_time", "departure_time",
-            "days", "budget",
-            "trip_budget", "attraction_preference", "food_preference",
-            "habit_preference", "trip_constraints", "excluded_memory_fact_ids",
-        }
-        patch = {key: value for key, value in combined.items() if key in durable_fields}
+        # 白名单本身放在 app/core/planning_brief.py，好让不依赖本模块的测试
+        # 直接断言「新字段有没有被漏掉」。
+        patch = {key: value for key, value in combined.items() if key in DURABLE_BRIEF_FIELDS}
         brief = await self.service.apply_brief_patch(run, patch)
         return brief, None
 
     async def _confirm_plan(
         self, run: dict[str, Any]
-    ) -> tuple[tuple[dict[str, Any], dict[str, Any]] | None, str | None]:
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+        """End the remaining questions; never create a Run from conversation.
+
+        正式规划只能由用户对需求摘要执行确认动作来启动。对话里的「开始规划」
+        表达的是「别再问了」，因此它把剩余可选字段一次性标记为已处理，然后让
+        用户看着摘要点确认。唯一的例外是重复确认已提交的需求，那是幂等返回。
+        """
         brief = await asyncio.to_thread(
             self.service.briefs.active_for_conversation,
             run["user_id"],
@@ -154,16 +185,19 @@ class DialogueActionExecutor:
                 run["conversation_id"],
             )
         if not brief:
-            return None, "目前没有可确认的旅行需求。"
-        if brief["status"] == "submitted" and brief.get("submitted_run_id"):
-            return (
-                brief,
-                await asyncio.to_thread(
-                    self.service.runs.get, run["user_id"], brief["submitted_run_id"]
-                ),
-            ), None
+            return None, None, "目前没有可确认的旅行需求。"
+        if brief["status"] == "submitted":
+            if not brief.get("submitted_run_id"):
+                return brief, None, "这份需求已经提交过了，请刷新后查看规划任务。"
+            created = await asyncio.to_thread(
+                self.service.runs.get, run["user_id"], brief["submitted_run_id"]
+            )
+            return brief, created, None
+        if brief["status"] not in self.service.briefs.ACTIVE:
+            return brief, None, "这份需求已经清除了，可以直接说说新的旅行想法。"
+        brief = await self._end_remaining_questions(run, brief)
         missing = required_brief_fields(brief["data"])
-        if brief["status"] != "ready" or missing:
+        if missing:
             labels = {
                 "destination": "目的地",
                 "start_date": "开始日期",
@@ -171,23 +205,23 @@ class DialogueActionExecutor:
                 "date_range": "有效日期范围",
             }
             needed = "、".join(labels.get(item, item) for item in missing)
-            return None, f"还需要补充：{needed or '完整旅行信息'}。"
-        submitted, planning_run = await self.service.submit_brief(
-            run["user_id"], brief["id"]
+            return brief, None, f"还需要补充：{needed or '完整旅行信息'}。"
+        return brief, None, "需求已经整理好了。确认一下上面的行程理解，就可以开始规划。"
+
+    async def _end_remaining_questions(
+        self, run: dict[str, Any], brief: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Mark every unanswered optional field as handled.
+
+        Returns the brief unchanged when there is nothing left to skip, so a
+        redundant "start planning" never publishes an empty update.
+        """
+        declined = auto_decline_questions(brief["data"])
+        if declined == declined_fields(brief["data"]):
+            return brief
+        return await self.service.apply_brief_patch(
+            run, {DECLINED_FIELDS_KEY: declined}
         )
-        await self.service.manager.publish(
-            run["id"],
-            "custom",
-            {
-                "kind": "planning_brief.submitted",
-                "brief_id": submitted["id"],
-                "status": submitted["status"],
-                "summary": submitted["data"],
-                "missing_fields": submitted["missing_fields"],
-            },
-            durable=True,
-        )
-        return (submitted, planning_run), None
 
     async def _create_revision(
         self, run: dict[str, Any], decision: DialogueDecision

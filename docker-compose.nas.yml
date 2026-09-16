@@ -75,10 +75,26 @@ services:
       # 若同时启动了下方 redis 服务，改为 redis://redis:6379/0
       REDIS_URL: ""
 
+      # 高德配额保护（默认开启，一般无需修改）
+      #
+      # 高德按「服务组」共享月配额：基础搜索服务 5,000/月，而一次 5 天单城市
+      # 规划就要消耗 13 次搜索。额度不足时程序直接拒绝请求、一次都不发出。
+      #
+      # 本地计数是估算（高德没有配额查询接口，计数从部署那刻从 0 开始）。
+      # 要把部署前的用量补进来，用控制台读数对账：
+      #   POST /api/runtime/amap-quota/reconcile  {"bucket":"search","used":1234}
+      #
+      # 0 = 不限制。调低会让规划直接不可用；调高则失去保护。
+      # AMAP_QUOTA_SEARCH_LIMIT: "4750"    # 官方 5000
+      # AMAP_QUOTA_WEATHER_LIMIT: "4750"   # 官方 5000
+      # AMAP_QUOTA_LBS_LIMIT: "0"          # 官方 150000，默认不限制（见 .env.example 说明）
+      # AMAP_QUOTA_WARNING_RATIO: "0.8"
+
       # 并发与 checkpoint 落盘位置（以下为默认值，一般无需修改）
       # RUNTIME_CHECKPOINT_DB: "data/langgraph-checkpoints.db"
       # RUNTIME_CHAT_CONCURRENCY: "8"
       # RUNTIME_PLANNING_CONCURRENCY: "2"
+      # RUNTIME_AMAP_CONCURRENCY: "8"      # 只约束异步高德调用，生效点在 app/core/async_resources.py
 
     # 数据持久化：命名卷由 Docker 管理，容器重建后规划历史不丢失
     # 命名卷名会带项目名前缀，例如 floattrip_floattrip-data

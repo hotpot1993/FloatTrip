@@ -1,28 +1,57 @@
-"""行程手动编辑 API 测试：search_city_pois / poi 搜索代理 / PUT timeline 保存。"""
+"""行程手动编辑 API 测试：search_city_pois_async / poi 搜索代理 / PUT timeline 保存。"""
 
 from __future__ import annotations
 
+import asyncio
 import urllib.parse
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 
 
-# ─── search_city_pois ────────────────────────────────────────
+def _fake_amap(monkeypatch, module, response, *, record=None):
+    """把某模块内的 `call_amap` 换成假通道。
+
+    高德请求现在统一经 `app.providers.amap.channel.call_amap` 发出（失败分类、
+    额度预占、并发约束都在那里），所以测试要接的是它，而不是更底层的
+    `http_get_json`。
+    """
+
+    async def _call(url, params, bucket, **kwargs):
+        if record is not None:
+            record["url"] = f"{url}?{urllib.parse.urlencode(params)}"
+            record["bucket"] = bucket
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(module, "call_amap", _call)
+
+
+# ─── search_city_pois_async ──────────────────────────────────
 
 class TestSearchCityPois:
-    def test_传入类型与关键词并解析结果(self, monkeypatch):
+    def test_传入类型与关键词并解析结果(self, monkeypatch, tmp_path):
+        from app.core.database import init_db
         from app.providers.amap import poi as poi_mod
 
+        init_db(tmp_path / "poi.db")
+        monkeypatch.setenv("AMAP_QUOTA_SEARCH_LIMIT", "0")
+
         captured = {}
-
-        def fake_get(url):
-            captured["url"] = url
-            return {"status": "1", "pois": [{"name": "颐和路", "location": "118.77,32.06"}]}
-
-        monkeypatch.setattr(poi_mod, "http_get_json", fake_get)
-        out = poi_mod.search_city_pois("南京", "k", keywords="颐和路", types="风景名胜", offset=8)
+        _fake_amap(
+            monkeypatch,
+            poi_mod,
+            {"status": "1", "pois": [{"name": "颐和路", "location": "118.77,32.06"}]},
+            record=captured,
+        )
+        out = asyncio.run(
+            poi_mod.search_city_pois_async(
+                "南京", "k", keywords="颐和路", types="风景名胜", offset=8
+            )
+        )
         assert out == [{"name": "颐和路", "location": "118.77,32.06"}]
 
         # 用 parse_qs 解析 URL query string
@@ -33,12 +62,30 @@ class TestSearchCityPois:
         assert query_params["citylimit"] == ["true"]
         assert query_params["offset"] == ["8"]
 
-    def test_接口失败抛RuntimeError(self, monkeypatch):
+    def test_归入基础搜索服务池(self, monkeypatch, tmp_path):
+        from app.core.amap_quota import QuotaBucket
+        from app.core.database import init_db
         from app.providers.amap import poi as poi_mod
 
-        monkeypatch.setattr(poi_mod, "http_get_json", lambda url: {"status": "0", "info": "INVALID_KEY"})
+        init_db(tmp_path / "poi.db")
+        captured = {}
+        _fake_amap(monkeypatch, poi_mod, {"status": "1", "pois": []}, record=captured)
+        asyncio.run(
+            poi_mod.search_city_pois_async("南京", "k", keywords="x", types="餐饮服务")
+        )
+        assert captured["bucket"] is QuotaBucket.SEARCH
+
+    def test_接口失败抛RuntimeError(self, monkeypatch, tmp_path):
+        from app.core.database import init_db
+        from app.providers.amap import poi as poi_mod
+        from app.providers.amap.channel import AmapRequestError
+
+        init_db(tmp_path / "poi.db")
+        _fake_amap(monkeypatch, poi_mod, AmapRequestError("高德请求失败：INVALID_KEY"))
         with pytest.raises(RuntimeError, match="INVALID_KEY"):
-            poi_mod.search_city_pois("南京", "k", keywords="x", types="餐饮服务")
+            asyncio.run(
+                poi_mod.search_city_pois_async("南京", "k", keywords="x", types="餐饮服务")
+            )
 
 
 # ─── API 路由测试基建 ────────────────────────────────────────
@@ -90,7 +137,7 @@ class TestPoiSearch:
 
         captured = {}
 
-        def fake_search(city, key, *, keywords, types, offset):
+        async def fake_search(city, key, *, keywords, types, offset):
             captured.update(city=city, keywords=keywords, types=types)
             return [{
                 "name": "颐和路历史街区", "location": "118.77,32.06",
@@ -98,7 +145,7 @@ class TestPoiSearch:
                 "address": "鼓楼区颐和路", "photos": [],
             }]
 
-        monkeypatch.setattr(plan_routes, "search_city_pois", fake_search)
+        monkeypatch.setattr(plan_routes, "search_city_pois_async", fake_search)
         monkeypatch.setattr(plan_routes, "amap_key", lambda: "fake-key")
 
         _, headers = make_auth()
@@ -116,14 +163,14 @@ class TestPoiSearch:
 
         captured = {}
 
-        def fake_search(city, key, *, keywords, types, offset):
+        async def fake_search(city, key, *, keywords, types, offset):
             captured["types"] = types
             return [{
                 "name": "南京大牌档", "location": "118.78,32.04", "type": "餐饮服务;中餐厅",
                 "biz_ext": {"rating": "4.6", "cost": "80"}, "address": "秦淮区贡院街", "photos": [],
             }]
 
-        monkeypatch.setattr(plan_routes, "search_city_pois", fake_search)
+        monkeypatch.setattr(plan_routes, "search_city_pois_async", fake_search)
         monkeypatch.setattr(plan_routes, "amap_key", lambda: "fake-key")
 
         _, headers = make_auth()
@@ -136,10 +183,10 @@ class TestPoiSearch:
     def test_高德失败返回502(self, client, monkeypatch):
         import app.api.plan_routes as plan_routes
 
-        def boom(city, key, *, keywords, types, offset):
+        async def boom(city, key, *, keywords, types, offset):
             raise RuntimeError("高德搜索失败：QUOTA")
 
-        monkeypatch.setattr(plan_routes, "search_city_pois", boom)
+        monkeypatch.setattr(plan_routes, "search_city_pois_async", boom)
         monkeypatch.setattr(plan_routes, "amap_key", lambda: "fake-key")
 
         _, headers = make_auth()
@@ -150,9 +197,13 @@ class TestPoiSearch:
         import app.api.plan_routes as plan_routes
 
         called = []
+
+        async def _boom(*a, **k):
+            called.append(1)
+            raise AssertionError("缓存命中时不该发起高德调用")
+
         monkeypatch.setattr(plan_routes, "get_cached", lambda key: [{"name": "缓存景点"}])
-        monkeypatch.setattr(plan_routes, "search_city_pois",
-                            lambda *a, **k: called.append(1))
+        monkeypatch.setattr(plan_routes, "search_city_pois_async", _boom)
 
         _, headers = make_auth()
         r = client.get("/api/poi/search", params={"city": "南京", "kw": "x"}, headers=headers)

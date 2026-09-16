@@ -49,6 +49,31 @@ class ChatAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不得原样重复上一轮的追问", messages[0].content)
         self.assertIn("brief_patch 为空", messages[0].content)
 
+    def test_prompt_hands_questioning_over_to_the_server(self):
+        system = dialogue_messages(self._context("我想出去玩"))[0].content
+        # 提问权在服务端：模型不得复述当前问题、不得自己编追问、不得罗列缺失字段。
+        self.assertIn("提问由系统负责", system)
+        self.assertIn("不要复述或转述正在问的那一道题", system)
+        # 规划意图但一个字段都提取不到时也要开单，否则提问流程根本启动不了。
+        self.assertIn("也使用 create_plan", system)
+        # 时段词就是终局答案：系统有保守下界，不再追问具体钟点。
+        self.assertIn("就是最终答案", system)
+        # 跳过只能写进 declined_fields，且只对可选题有效。
+        self.assertIn("declined_fields", system)
+
+    def test_brief_patch_carries_declined_fields(self):
+        decision = DialogueDecision.model_validate({
+            "intent": "update_brief",
+            "reply": "好。",
+            "brief_patch": {"declined_fields": ["arrival_time", "destination"]},
+        })
+        # schema 层是宽容的：必填字段被写进来也不会报错，由领域层
+        # declined_fields() 负责丢弃，避免需求单永远问不完。
+        self.assertEqual(
+            decision.brief_patch.model_dump(exclude_none=True),
+            {"declined_fields": ["arrival_time", "destination"]},
+        )
+
     def test_chinese_dialogue_evaluation_fixture_has_actionable_semantics(self):
         cases = json.loads(
             (Path(__file__).parent / "data" / "dialogue_eval_cases.json").read_text(

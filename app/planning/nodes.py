@@ -28,7 +28,7 @@ def _constraints_block(
     )
 
 from app.llm.factory import build_structured_llm
-from app.providers.amap.poi import search_around_pois, search_around_pois_async
+from app.providers.amap.poi import search_around_pois_async
 from app.planning.schemas import (
     DayMealPick,
     IntentExtraction,
@@ -45,9 +45,7 @@ from app.planning.helpers import (
     clean_pref,
     cluster_pois_by_location,
     dinner_anchor_spot,
-    fetch_city_spots,
     fetch_city_spots_async,
-    fetch_weather_for_dates,
     fetch_weather_for_dates_async,
     filter_by_rating,
     format_spots_for_llm,
@@ -159,12 +157,17 @@ def make_intent_node(model_name: str | None, profile_hint: str = ""):
                 days = (end - start).days + 1
 
         # 天气预报（仅当目的地和日期均已确定时拉取）
+        #
+        # 这里同时装上配额预警的发送器：intent 是图里第一个发高德请求的节点
+        # （天气），attach_run_warning_sink 会把预警事件挂到当前 Run 上。
+        # 没有 Run 上下文时 —— 例如直接调用节点的测试 —— 预警只落日志。
         forecast: list[dict[str, Any]] = []
         w_note: str | None = None
         if not missing and destination and start and end:
-            forecast, w_note = await fetch_weather_for_dates_async(
-                destination, start, end, amap_key()
-            )
+            with attach_run_warning_sink():
+                forecast, w_note = await fetch_weather_for_dates_async(
+                    destination, start, end, amap_key()
+                )
 
         # 偏好归一化：去空白，并把 LLM 偶吐的 'null'/'无' 等占位垃圾值视为无偏好
         opt = clean_pref

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from itertools import permutations
 
@@ -9,7 +10,15 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.core.auth import decode_token
-from app.core.cache import POI_TTL, get_cached, poi_cache_key, set_cached
+from app.core.amap_quota import QuotaBucket
+from app.core.cache import (
+    MANUAL_SEARCH_TTL,
+    WALKING_TTL,
+    get_cached,
+    poi_cache_key,
+    set_cached,
+    walking_cache_key,
+)
 from app.core.database import get_conn
 from app.core.memory import (
     delete_pending_modification,
@@ -20,12 +29,14 @@ from app.core.memory import (
 )
 from app.planning.graph import run_confirm_stream
 from app.planning.helpers import amap_key, haversine_km, restaurant_to_dict
+from app.providers.amap.channel import call_amap
+from app.providers.amap.client import AMAP_WALKING_URL
 from app.providers.amap.poi import (
     ATTRACTION_TYPE,
     normalize_address,
     poi_to_spot,
-    search_around_pois,
-    search_city_pois,
+    search_around_pois_async,
+    search_city_pois_async,
 )
 from pydantic import BaseModel
 
@@ -336,13 +347,17 @@ async def confirm_modification(req: ConfirmModificationRequest, request: Request
 
 
 @router.get("/api/poi/search")
-def poi_search(
+async def poi_search(
     city: str,
     kw: str,
     kind: str = "attraction",
     authorization: str | None = Header(default=None),
 ):
-    """手动换点/加点的搜索代理：高德 Key 不出服务端，结果走 Redis 缓存。"""
+    """手动换点/加点的搜索代理：高德 Key 不出服务端，结果走 Redis 缓存。
+
+    改成 async 是为了走 `app.providers.amap.channel`——那是唯一会预占额度并
+    受并发约束的出口。同步路由原本完全绕过并发信号量。
+    """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="需要登录")
     if not decode_token(authorization[7:]):
@@ -358,15 +373,19 @@ def poi_search(
     if len(city) > 50 or len(kw) > 100:
         raise HTTPException(status_code=400, detail="搜索词过长")
 
+    # 缓存键带上 kind：同一个关键词下「找景点」与「找餐厅」结果完全不同，
+    # 不带 kind 会互相覆盖。
     cache_key = poi_cache_key(city, f"manual:{kind}:{kw}")
-    cached = get_cached(cache_key)
+    cached = await asyncio.to_thread(get_cached, cache_key)
     if cached is not None:
         return {"results": cached}
 
     types = ATTRACTION_TYPE if kind == "attraction" else "餐饮服务"
     try:
-        raw = search_city_pois(city, amap_key(), keywords=kw, types=types, offset=8)
-    except RuntimeError as e:
+        raw = await search_city_pois_async(city, amap_key(), keywords=kw, types=types, offset=8)
+    except HTTPException:
+        raise
+    except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
     results: list[dict] = []
@@ -379,7 +398,7 @@ def poi_search(
             parsed["address"] = normalize_address(poi.get("address"))
         results.append(parsed)
 
-    set_cached(cache_key, results, POI_TTL)
+    await asyncio.to_thread(set_cached, cache_key, results, MANUAL_SEARCH_TTL)
     return {"results": results}
 
 
@@ -467,7 +486,7 @@ def save_timeline(
 
 
 @router.get("/api/poi/nearby")
-def poi_nearby(
+async def poi_nearby(
     lat: float,
     lng: float,
     type: str,
@@ -487,7 +506,7 @@ def poi_nearby(
         raise HTTPException(status_code=400, detail="radius 须在 1–5000 之间")
 
     try:
-        raw_pois = search_around_pois(
+        raw_pois = await search_around_pois_async(
             {"lat": lat, "lng": lng},
             amap_key(),
             types=type,
@@ -574,25 +593,37 @@ def save_plan_metadata(
 
 
 @router.get("/api/route/walking")
-def route_walking(
+async def route_walking(
     origin_lng: float,
     origin_lat: float,
     dest_lng: float,
     dest_lat: float,
     authorization: str | None = Header(default=None),
 ):
-    """调用高德步行路线 REST API，返回解码后的坐标数组供前端绘制。"""
+    """调用高德步行路线 REST API，返回解码后的坐标数组供前端绘制。
+
+    这条路由以前直接 `httpx.get`，绕过 `app/core/http.py`，既没有并发约束也不
+    计数。现在走统一通道：归入 `lbs` 池（默认不限制——该池 150,000/月 的主流
+    消耗者是前端的 AMap.Driving，服务端数不到），并按坐标对缓存——用户反复点
+    「导航」看同一段路，不该每次都真的请求一次。
+    """
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="需要登录")
     if not decode_token(authorization[7:]):
         raise HTTPException(status_code=401, detail="token 无效或已过期")
 
-    import httpx
     key = amap_key()
     if not key:
         raise HTTPException(status_code=503, detail="未配置 AMAP_API_KEY")
 
-    url = "https://restapi.amap.com/v3/direction/walking"
+    cache_key = walking_cache_key(
+        {"lng": origin_lng, "lat": origin_lat},
+        {"lng": dest_lng, "lat": dest_lat},
+    )
+    cached = await asyncio.to_thread(get_cached, cache_key)
+    if cached is not None:
+        return cached
+
     params = {
         "key": key,
         "origin": f"{origin_lng},{origin_lat}",
@@ -600,9 +631,7 @@ def route_walking(
         "output": "json",
     }
     try:
-        resp = httpx.get(url, params=params, timeout=8)
-        resp.raise_for_status()
-        data = resp.json()
+        data = await call_amap(AMAP_WALKING_URL, params, QuotaBucket.LBS, timeout=8)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"高德请求失败: {e}")
 
@@ -621,4 +650,12 @@ def route_walking(
                 except ValueError:
                     pass
 
-    return {"coords": coords, "distance": path.get("distance"), "duration": path.get("duration")}
+    payload = {
+        "coords": coords,
+        "distance": path.get("distance"),
+        "duration": path.get("duration"),
+    }
+    # 只缓存成功结果：失败响应（含配额耗尽）不得进入缓存。
+    if coords:
+        await asyncio.to_thread(set_cached, cache_key, payload, WALKING_TTL)
+    return payload

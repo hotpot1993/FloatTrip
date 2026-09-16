@@ -8,17 +8,19 @@ import os
 import re
 import asyncio
 import time
+from contextlib import contextmanager
 from datetime import date, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from app.core.amap_notify import emit_into_current_run
+from app.core.amap_quota import AmapQuotaExceeded
 from app.core.env import load_local_env
 from app.core.async_resources import provider_slot
 from app.providers.amap.poi import (
     parse_location,
     normalize_address,
-    search_attraction_pois,
     search_attraction_pois_async,
     poi_to_spot,
 )
@@ -32,6 +34,35 @@ def amap_key() -> str:
     if not key:
         raise RuntimeError("缺少 AMAP_API_KEY，请在 .env.local 中配置")
     return key
+
+
+@contextmanager
+def attach_run_warning_sink():
+    """在当前上下文中装上高德配额预警的发送器。
+
+    调用通道在预占额度首次越过阈值时需要一个出口把预警交给用户，但它既不知道
+    当前是哪个 Run，也不该依赖运行时层。这里用 contextvar 桥接：装上发送器后，
+    通道发出的预警会作为 `amap.quota_warning` 自定义事件挂到当前 Run 上。
+
+    没有正在运行的 Run 时（直接调用节点、脚本）不装任何东西，通道退化为落日志。
+    """
+    try:
+        from app.runtime.worker import current_emit
+    except Exception:  # noqa: BLE001
+        # 运行时层不可用不应影响规划本身：规划曾经完全不依赖它。
+        yield
+        return
+
+    emit = current_emit()
+    if emit is None:
+        yield
+        return
+
+    def sink(kind: str, payload: dict[str, Any]) -> None:
+        emit(kind, payload)
+
+    with emit_into_current_run(sink):
+        yield
 
 
 # ─── 日期解析 ─────────────────────────────────────────────────
@@ -146,30 +177,14 @@ def clean_pref(v: str | None) -> str | None:
 
 # ─── 候选景点池 ───────────────────────────────────────────────
 
-def fetch_city_spots(city: str, api_key: str, *, max_spots: int = 30) -> list[dict[str, Any]]:
-    """多关键词搜索 + 去重，返回最多 max_spots 个有坐标的候选景点。"""
-    keywords_list = [f"{city}必去景点", f"{city}热门景区", f"{city}博物馆"]
-    seen: set[str] = set()
-    spots: list[dict[str, Any]] = []
-    for kw in keywords_list:
-        if len(spots) >= max_spots:
-            break
-        for raw in search_attraction_pois(city, api_key, keywords=kw):
-            if len(spots) >= max_spots:
-                break
-            name = raw.get("name", "")
-            if name in seen:
-                continue
-            spot = poi_to_spot(raw)
-            if spot:
-                seen.add(name)
-                spots.append(spot)
-    return spots
-
-
 async def fetch_city_spots_async(
     city: str, api_key: str, *, max_spots: int = 30
 ) -> list[dict[str, Any]]:
+    """多关键词并发搜索 + 去重，返回最多 max_spots 个有坐标的候选景点。
+
+    固定 3 个关键词、并发发出：一次规划消耗 3 次基础搜索服务额度
+    （缓存命中则 0 次）。改动关键词数量会直接改变每次规划的额度开销。
+    """
     keywords_list = [f"{city}必去景点", f"{city}热门景区", f"{city}博物馆"]
     pages = await asyncio.gather(
         *(
@@ -588,56 +603,6 @@ async def ainvoke_structured(
 
 # ─── 天气工具 ─────────────────────────────────────────────────
 
-def fetch_weather_for_dates(
-    destination: str,
-    start_date: date,
-    end_date: date,
-    api_key: str,
-) -> tuple[list[dict[str, Any]], str | None]:
-    """获取旅游日期范围内的逐日天气预报。
-
-    调用高德天气 API（最多约 4 天预报），按旅游日期切片匹配。
-
-    Returns:
-        (forecast_list, weather_note)
-        - forecast_list: 与旅游日期匹配的天气列表（空表示无可用预报）
-        - weather_note:  降级说明文字（正常获取时为 None）
-    """
-    from app.providers.weather.amap import fetch_forecast
-
-    try:
-        all_forecasts = fetch_forecast(destination, api_key)
-    except Exception:
-        all_forecasts = []
-
-    if not all_forecasts:
-        return [], "天气信息获取失败，按晴天规划路线"
-
-    forecast_map = {f["date"]: f for f in all_forecasts}
-
-    # 生成旅游日期序列
-    travel_dates: list[str] = []
-    cur = start_date
-    while cur <= end_date:
-        travel_dates.append(cur.isoformat())
-        cur += timedelta(days=1)
-
-    matched = [forecast_map[d] for d in travel_dates if d in forecast_map]
-    missing_dates = [d for d in travel_dates if d not in forecast_map]
-
-    if not matched:
-        return [], "旅游日期超出天气预报范围（高德预报约 4 天内），建议出行前关注天气预报"
-
-    note: str | None = None
-    if missing_dates:
-        note = (
-            f"部分旅游日期（{'、'.join(missing_dates)}）超出天气预报范围，"
-            "建议出行前关注天气预报"
-        )
-
-    return matched, note
-
-
 async def fetch_weather_for_dates_async(
     destination: str,
     start_date: date,
@@ -648,6 +613,11 @@ async def fetch_weather_for_dates_async(
 
     try:
         all_forecasts = await fetch_forecast_async(destination, api_key)
+    except AmapQuotaExceeded:
+        # 额度用完不能降级成「按晴天规划」：那会把一次代价明确的失败
+        # 变成一份没有天气依据的行程，用户还不知道为什么。让它冒泡，由
+        # Run 带着可读原因失败。
+        raise
     except Exception:
         all_forecasts = []
     if not all_forecasts:

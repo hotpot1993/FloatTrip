@@ -196,6 +196,13 @@ function updatePlanningBrief(id, patch) {
 function refreshPlanningBriefMemory(id) {
   return apiJson(`/api/planning-briefs/${id}/memory/refresh`, { method: "POST" });
 }
+// 候选项的结构化回答：不经过对话理解，也不产生对话消息。
+// 服务端只接受「当前正在问的那一题」，所以这里不做任何本地推断。
+function answerPlanningBriefQuestion(id, field, value) {
+  return apiJson(`/api/planning-briefs/${id}/answers`, {
+    method: "POST", body: JSON.stringify({ field, value }),
+  });
+}
 function submitPlanningBrief(id) {
   return apiJson(`/api/planning-briefs/${id}/submit`, { method: "POST" });
 }
@@ -824,6 +831,8 @@ Object.assign(window, {
   listConversations, createConversation, markConversationViewed,
   getConversationMessages, submitConversationMessage,
   compressConversation, archiveConversation, retryConversationMemory,
+  getActivePlanningBrief, updatePlanningBrief, refreshPlanningBriefMemory,
+  submitPlanningBrief, discardPlanningBrief, answerPlanningBriefQuestion,
   getConfig, ensureAMap, initAmapForDay, destroyAmap,
   optimizeDay, revertDay,
   searchPoi, saveTimeline,

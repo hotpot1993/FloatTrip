@@ -38,6 +38,7 @@ class PlanningBriefPatch(_StrictModel):
     habit_preference: str | None = None
     trip_constraints: list[TripConstraintPatch] | None = Field(default=None, max_length=30)
     remove_trip_constraint_ids: list[str] | None = Field(default=None, max_length=30)
+    declined_fields: list[str] | None = Field(default=None, max_length=10)
     excluded_memory_fact_ids: list[str] | None = Field(default=None, max_length=100)
     restored_memory_fact_ids: list[str] | None = Field(default=None, max_length=100)
 

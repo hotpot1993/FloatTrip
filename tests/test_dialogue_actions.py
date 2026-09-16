@@ -78,23 +78,152 @@ class DialogueActionTests(unittest.IsolatedAsyncioTestCase):
         messages = self.conversations.messages("owner", self.conversation["id"])
         self.assertIn("日期范围", messages[-1]["content"])
 
-    async def test_confirm_ready_brief_is_idempotent(self):
+    async def test_planning_intent_without_any_field_still_creates_a_brief(self):
+        """用户只说「我想出去玩」时也要开单并开始提问。
+
+        否则最需要被逐项问清楚的场景永远进不了提问流程——这正是本次改动
+        要修的那个缺口。
+        """
+        run = await self._chat_run("我想出去玩")
+        result = await self.service.actions.execute(
+            run,
+            DialogueDecision(intent="create_plan", reply="那我们先把想法理一理。"),
+        )
+        brief = self.service.briefs.get("owner", result["brief_id"])
+        self.assertEqual(brief["status"], "collecting")
+        self.assertEqual(brief["question"]["field"], "destination")
+        self.assertFalse(brief["collected"])
+
+    async def test_confirmation_ends_the_questions_without_creating_a_run(self):
+        """「开始规划」表达的是「别再问了」，不是「立刻建任务」。"""
+        run = await self._chat_run()
+        await self.service.apply_brief_patch(
+            run,
+            {"destination": "南京", "start_date": "2026-07-24", "end_date": "2026-07-26"},
+        )
+        before = self.service.briefs.active_for_conversation(
+            "owner", self.conversation["id"]
+        )
+        self.assertEqual(before["question"]["field"], "arrival_time")
+
+        result = await self.service.actions.execute(
+            run, DialogueDecision(intent="confirm_plan", reply="现在就规划吧。")
+        )
+
+        self.assertNotIn("created_run_id", result)
+        brief = self.service.briefs.get("owner", result["brief_id"])
+        self.assertEqual(brief["status"], "ready")
+        self.assertEqual(brief["declined_fields"], [
+            "arrival_time", "departure_time", "trip_budget", "preferences",
+        ])
+        self.assertTrue(brief["collected"])
+        self.assertIsNone(brief["question"])
+        runs = self.manager.runs.list("owner", conversation_id=self.conversation["id"])
+        self.assertEqual(
+            [item for item in runs if item["kind"] == RunKind.TRAVEL_PLAN.value], []
+        )
+        messages = self.conversations.messages("owner", self.conversation["id"])
+        self.assertIn("确认", messages[-1]["content"])
+
+    async def test_required_gap_keeps_being_asked_after_a_start_request(self):
+        """必填不齐时「别问了」不成立：可选停问，必填继续问。"""
+        run = await self._chat_run("直接开始规划吧")
+        result = await self.service.actions.execute(
+            run,
+            DialogueDecision(intent="create_plan", reply="好。", brief_patch={"days": 3}),
+        )
+        await self.service.actions.execute(
+            run, DialogueDecision(intent="confirm_plan", reply="别问了，开始吧。")
+        )
+        brief = self.service.briefs.get("owner", result["brief_id"])
+        self.assertEqual(brief["declined_fields"], [
+            "arrival_time", "departure_time", "trip_budget", "preferences",
+        ])
+        self.assertEqual(brief["question"]["field"], "destination")
+        self.assertFalse(brief["collected"])
+        runs = self.manager.runs.list("owner", conversation_id=self.conversation["id"])
+        self.assertEqual(
+            [item for item in runs if item["kind"] == RunKind.TRAVEL_PLAN.value], []
+        )
+
+    async def test_duplicate_confirmation_after_submission_returns_the_same_run(self):
         run = await self._chat_run()
         brief = await self.service.apply_brief_patch(
             run,
             {"destination": "南京", "start_date": "2026-07-24", "end_date": "2026-07-26"},
         )
+        _brief, planning_run = await self.service.submit_brief("owner", brief["id"])
         first = await self.service.actions.execute(
-            run, DialogueDecision(intent="confirm_plan", reply="现在开始规划。")
+            run, DialogueDecision(intent="confirm_plan", reply="开始。")
         )
         second = await self.service.actions.execute(
             run, DialogueDecision(intent="confirm_plan", reply="再确认一次。")
         )
+        self.assertEqual(first["created_run_id"], planning_run["id"])
+        self.assertEqual(second["created_run_id"], planning_run["id"])
         runs = self.manager.runs.list("owner", conversation_id=self.conversation["id"])
-        self.assertEqual(len([item for item in runs if item["kind"] == RunKind.TRAVEL_PLAN.value]), 1)
-        self.assertTrue(first["created_run_id"])
-        self.assertEqual(second["created_run_id"], first["created_run_id"])
-        self.assertEqual(self.service.briefs.get("owner", brief["id"])["status"], "submitted")
+        self.assertEqual(
+            len([item for item in runs if item["kind"] == RunKind.TRAVEL_PLAN.value]), 1
+        )
+
+    async def test_skipped_field_survives_a_later_brief_patch(self):
+        """跳过记录必须活着穿过语言模型那条写入路径。
+
+        回归测试针对的是 docs.md 问题十四记录过的失败模式：新字段只在半数
+        路径生效。这里的症状会是「用户跳过抵达时刻，之后随便补充一句，抵达
+        时刻被重新问一遍」。
+        """
+        run = await self._chat_run()
+        await self.service.actions.execute(
+            run,
+            DialogueDecision(
+                intent="create_plan", reply="好的。",
+                brief_patch={
+                    "destination": "南京",
+                    "start_date": "2026-07-24",
+                    "end_date": "2026-07-26",
+                },
+            ),
+        )
+        await self.service.actions.execute(
+            run,
+            DialogueDecision(
+                intent="update_brief", reply="记下了。",
+                brief_patch={"declined_fields": ["arrival_time"]},
+            ),
+        )
+        brief = self.service.briefs.active_for_conversation(
+            "owner", self.conversation["id"]
+        )
+        self.assertEqual(brief["declined_fields"], ["arrival_time"])
+        self.assertEqual(brief["question"]["field"], "departure_time")
+
+        await self.service.actions.execute(
+            run,
+            DialogueDecision(
+                intent="update_brief", reply="好。", brief_patch={"trip_budget": "6000"},
+            ),
+        )
+        brief = self.service.briefs.active_for_conversation(
+            "owner", self.conversation["id"]
+        )
+        self.assertEqual(brief["data"]["trip_budget"], "6000")
+        self.assertEqual(brief["declined_fields"], ["arrival_time"])
+        self.assertEqual(brief["question"]["field"], "departure_time")
+
+    async def test_model_cannot_skip_a_required_field(self):
+        """语言模型写错跳过列表时不能让需求单永远问不完。"""
+        run = await self._chat_run()
+        result = await self.service.actions.execute(
+            run,
+            DialogueDecision(
+                intent="create_plan", reply="好的。",
+                brief_patch={"declined_fields": ["destination", "date_range"]},
+            ),
+        )
+        brief = self.service.briefs.get("owner", result["brief_id"])
+        self.assertEqual(brief["declined_fields"], [])
+        self.assertEqual(brief["question"]["field"], "destination")
 
     async def test_control_requires_structured_action_and_valid_target_state(self):
         target = self.manager.create(

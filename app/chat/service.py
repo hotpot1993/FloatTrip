@@ -135,6 +135,11 @@ class ChatService:
                 "status": brief["status"],
                 "summary": brief["data"],
                 "missing_fields": brief["missing_fields"],
+                # 提问投影随事件一起下发，前端不必自己推算「接下来问什么」。
+                "question": brief.get("question"),
+                "collected": bool(brief.get("collected")),
+                "declined_fields": brief.get("declined_fields") or [],
+                "answered_fields": brief.get("answered_fields") or [],
                 "memory_context": brief["memory_context"],
                 "effective_constraints": brief["effective_constraints"],
                 "constraint_coverage": brief["constraint_coverage"],
@@ -293,6 +298,11 @@ class ChatService:
             "status": brief["status"],
             "data": brief["data"],
             "missing_fields": brief["missing_fields"],
+            # 自由输入的回答必须知道服务端当前在问哪一项，否则「傍晚」这句
+            # 会被理解成一句没有归属的话。
+            "question": brief.get("question"),
+            "collected": bool(brief.get("collected")),
+            "declined_fields": brief.get("declined_fields") or [],
             "memory_context": brief.get("memory_context"),
             "effective_constraints": brief.get("effective_constraints") or [],
         }

@@ -82,6 +82,12 @@ class PlanningBriefEvent(BaseModel):
     status: Literal["collecting", "ready", "submitted", "discarded"]
     summary: dict[str, Any] = Field(default_factory=dict)
     missing_fields: list[str] = Field(default_factory=list)
+    # 字段提问相关的投影。终态事件（submitted / discarded）不携带提问，
+    # 因此全部可选；它们与 summary 一样由 data 现算，不落库。
+    question: dict[str, Any] | None = None
+    collected: bool = False
+    declined_fields: list[str] = Field(default_factory=list)
+    answered_fields: list[str] = Field(default_factory=list)
 
 
 class PlanningProgressEvent(BaseModel):
@@ -110,11 +116,30 @@ class ItineraryCreatedEvent(BaseModel):
     destination: str = ""
 
 
+class QuotaWarningEvent(BaseModel):
+    """高德配额接近上限的预警。
+
+    由 `app/core/amap_notify.notify_quota_warning` 发出，经调用通道在额度预占
+    首次越过阈值时触发。这里必须登记：本模型是图来源自定义事件的唯一白名单
+    （`extra="forbid"`），不登记就会被 `_validated_custom` 静默丢掉。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["amap.quota_warning"]
+    bucket: str
+    used: int
+    limit: int
+    remaining: int | None = None
+    message: str = ""
+
+
 CUSTOM_EVENT_TYPES = (
     PlanningBriefEvent
     | PlanningProgressEvent
     | WaitingUserEvent
     | ItineraryCreatedEvent
+    | QuotaWarningEvent
 )
 
 

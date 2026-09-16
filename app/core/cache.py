@@ -71,6 +71,12 @@ def set_cached(key: str, value: Any, ttl_seconds: int) -> None:
 
 
 # ─── 缓存键命名工具 ──────────────────────────────────────────
+#
+# 命名空间约定：`tripagent:{类别}:...`。**新类别必须另起一段前缀**，不能往
+# 既有前缀后面续键——否则两类语义不同的结果会落进同一个键空间。
+#
+# 高德按「服务组」共享月配额，缓存命中不消耗额度，所以每一个能命中的缓存
+# 都是一次真实的额度节省。
 
 def weather_cache_key(city: str) -> str:
     """天气预报缓存键。格式：tripagent:weather:{city}"""
@@ -78,11 +84,70 @@ def weather_cache_key(city: str) -> str:
 
 
 def poi_cache_key(city: str, keyword: str) -> str:
-    """POI 搜索缓存键。格式：tripagent:poi:{city}:{keyword}"""
+    """POI 关键字搜索缓存键。格式：tripagent:poi:{city}:{keyword}
+
+    注意：这个键只看城市与关键词，**不含 types / offset / radius**。调用方
+    必须自己保证 `keyword` 带上足以区分结果集的上下文，否则不同参数的结果会
+    互相污染。新增的周边搜索与步行路线因此另起了命名空间（见下）。
+    """
     return f"tripagent:poi:{city}:{keyword}"
+
+
+# 坐标保留位数：4 位小数约 11 米。周边搜索的半径以公里计，11 米的抖动不该
+# 造成缓存未命中；再粗就会让两个不同路口共用一份结果。
+COORD_PRECISION = 4
+
+
+def _coord(value: float) -> str:
+    return f"{float(value):.{COORD_PRECISION}f}"
+
+
+def nearby_cache_key(
+    location: dict[str, float],
+    *,
+    radius: int,
+    types: str,
+    keyword: str,
+    offset: int,
+) -> str:
+    """周边搜索缓存键。
+
+    格式：`tripagent:nearby:{lng},{lat}:r{radius}:o{offset}:t{types}:k{keyword}`
+
+    刻意不放进 `tripagent:poi:` 命名空间：既有 `poi_cache_key` 不含 radius /
+    types / offset，两者若共用一个前缀，围绕同一点的关键字搜索与餐饮周边搜索
+    会在同一个键上互相覆盖。
+    """
+    return (
+        f"tripagent:nearby:{_coord(location['lng'])},{_coord(location['lat'])}"
+        f":r{radius}:o{offset}:t{types}:k{keyword}"
+    )
+
+
+def walking_cache_key(
+    origin: dict[str, float], destination: dict[str, float]
+) -> str:
+    """步行路线缓存键。
+
+    格式：`tripagent:walk:{olng},{olat}->{dlng},{dlat}`
+
+    不做起终点排序归一：步行路线的几何形状是方向相关的（虽然距离对称），
+    归一化会省下一半键空间，但代价是可能返回与请求方向不符的折线。
+    """
+    return (
+        f"tripagent:walk:{_coord(origin['lng'])},{_coord(origin['lat'])}"
+        f"->{_coord(destination['lng'])},{_coord(destination['lat'])}"
+    )
 
 
 # ─── TTL 常量 ──────────────────────────────────────────────────
 
-WEATHER_TTL = 4 * 3600    # 天气缓存 4 小时
-POI_TTL = 12 * 3600       # POI 缓存 12 小时
+WEATHER_TTL = 4 * 3600     # 天气缓存 4 小时
+POI_TTL = 12 * 3600        # POI 关键字搜索缓存 12 小时
+MANUAL_SEARCH_TTL = 12 * 3600  # 手动编辑的搜索代理缓存 12 小时（与 POI_TTL 同为半天）
+
+# 周边搜索：餐厅是会被选进行程的对象，缓存太久会让用户看到已关门的店。
+NEARBY_TTL = 2 * 3600
+
+# 步行路线：同一对坐标的步行折线实质上不随时间变化，可以放长。
+WALKING_TTL = 7 * 24 * 3600

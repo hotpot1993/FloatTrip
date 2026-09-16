@@ -28,6 +28,7 @@ from pydantic import BaseModel
 
 from app.core.auth import decode_token
 from app.core.database import get_conn, init_db
+from app.core.amap_quota import validate_quota_config
 from app.core.env import load_local_env
 from app.core.memory import (
     load_itinerary,
@@ -54,6 +55,9 @@ from app.runtime.compat import (
 
 load_local_env()
 init_db()
+# 配额配置非法必须让启动失败。传 0 的意图是「不限制」，一个拼错的负数或非数字
+# 绝不能退化成同样的效果——那会让保护静默消失，而用户以为它在。
+validate_quota_config()
 
 # ─── 应用 ────────────────────────────────────────────────────
 

@@ -30,7 +30,20 @@ class RuntimeScheduler:
         self.planning_capacity = asyncio.Semaphore(max(1, planning_limit))
         self.planning_per_user = max(1, planning_per_user)
         self.llm_capacity = asyncio.Semaphore(max(1, llm_limit))
-        self.amap_capacity = asyncio.Semaphore(max(1, amap_limit))
+        # 注意：这里刻意**不**持有 AMap 并发信号量。
+        #
+        # 曾有一个 `self.amap_capacity`，但它全仓库没有任何读取点——是个死字段。
+        # 它和 app/core/async_resources.py 的同名信号量读同一个环境变量、默认值
+        # 也一样，所以看上去「生效」，实际限流点在别处。留着这个假象会让人以为
+        # 调度器在限流 provider 并发。
+        #
+        # 真正生效的是 app/core/async_resources.py 的模块级 `amap_capacity`
+        # （读 RUNTIME_AMAP_CONCURRENCY，默认 8），由高德调用通道经
+        # `provider_slot("amap")` 获取。
+        #
+        # `amap_limit` 参数保留仅为兼容既有构造调用点（app/runtime/container.py），
+        # 不再被使用。
+        self._amap_limit_unused = amap_limit
         self._user_planning: dict[str, asyncio.Semaphore] = defaultdict(
             lambda: asyncio.Semaphore(self.planning_per_user)
         )

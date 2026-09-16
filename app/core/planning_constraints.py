@@ -71,20 +71,28 @@ def normalize_brief_data(data: dict[str, Any] | None) -> dict[str, Any]:
             seen.add(key)
             constraints.append(normalized)
     for field, category in LEGACY_CONSTRAINT_FIELDS.items():
-        value = str(result.get(field) or "").strip()
+        # 旧偏好字段是**一次性迁移**，不是每次读取都重新派生的数据源。
+        # 早先的写法只做投影不移除键，于是用户改掉由它派生出来的那条约束并
+        # 保存后，旧字符串会被再派生一遍，同一偏好变成两条。移除键之后，
+        # 下一次写库就不再带它了（规格里「兼容读取旧偏好字段」的语义是读取
+        # 兼容，不是永久复读）。
+        if field not in result:
+            continue
+        value = str(result.pop(field) or "").strip()
         key = (category, value.casefold(), "prefer")
-        if value and key not in seen:
-            seen.add(key)
-            constraints.append(
-                {
-                    "id": _constraint_id(category, value, legacy_key=field),
-                    "category": category,
-                    "value_text": value,
-                    "polarity": "prefer",
-                    "source": "conversation",
-                    "evidence_sequences": [],
-                }
-            )
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        constraints.append(
+            {
+                "id": _constraint_id(category, value, legacy_key=field),
+                "category": category,
+                "value_text": value,
+                "polarity": "prefer",
+                "source": "conversation",
+                "evidence_sequences": [],
+            }
+        )
     result["trip_constraints"] = constraints
     result["excluded_memory_fact_ids"] = sorted(
         {str(value) for value in result.get("excluded_memory_fact_ids") or [] if value}

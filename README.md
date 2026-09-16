@@ -267,8 +267,12 @@ RUNTIME_CHAT_CONCURRENCY=8             # Chat Run 并发上限（可选）
 RUNTIME_PLANNING_CONCURRENCY=2         # 正式规划 / 修改的全局并发上限（可选）
 RUNTIME_PLANNING_PER_USER=2            # 单用户正式规划 / 修改并发上限（可选）
 RUNTIME_LLM_CONCURRENCY=8              # LLM 调用并发容量（可选）
-RUNTIME_AMAP_CONCURRENCY=8             # 高德调用并发容量（可选）
+RUNTIME_AMAP_CONCURRENCY=8             # 高德调用并发容量（可选，只约束异步调用）
 RUNTIME_CHECKPOINT_DB=data/langgraph-checkpoints.db  # LangGraph checkpoint 文件（可选）
+AMAP_QUOTA_SEARCH_LIMIT=4750           # 基础搜索服务月配额（可选，0=不限制，官方 5000）
+AMAP_QUOTA_WEATHER_LIMIT=4750          # 天气预报月配额（可选，0=不限制，官方 5000）
+AMAP_QUOTA_LBS_LIMIT=0                 # 基础LBS服务月配额（可选，0=不限制，官方 150000）
+AMAP_QUOTA_WARNING_RATIO=0.8           # 配额预警阈值比例（可选）
 ```
 
 > 多 LLM 提供商的详细配置、切换方式与故障排查见 [`LLM_PROVIDERS.md`](LLM_PROVIDERS.md)。
@@ -378,7 +382,9 @@ Intent 阶段自动拉取高德天气预报（复用已有 `AMAP_API_KEY`），�
 Reviewer 不再负责开放时间检查（交给 Time Check）。`RouteReview` schema 拆成两个输出字段：`route_modify_opinion`（技术诊断，给 Planner 看）和 `issues`（友好出行提醒，给用户看，禁止"违规/冲突"等批判词）。`day_proximity_report` 增加跨天中心间距计算，不足 5km 时自动标注⚠️，客观检测多天行程在同一区域反复横跳的问题。
 
 **10. Redis 缓存层（可选，优雅降级）**
-高德天气（TTL=4h）和 POI 搜索（TTL=12h）结果自动写入 Redis，重复请求直接命中缓存。`REDIS_URL` 未配置或 Redis 不可用时，`cache.py` 静默降级为透传，整个功能无任何副作用，不影响主流程稳定性。
+高德天气（TTL=4h）、POI 关键字搜索（TTL=12h）、周边搜索（TTL=2h）与步行路线（TTL=7d）结果自动写入 Redis，重复请求直接命中缓存。`REDIS_URL` 未配置或 Redis 不可用时，`cache.py` 静默降级为透传，整个功能无任何副作用，不影响主流程稳定性。
+
+缓存与配额保护是**两层互不依赖**的机制：命中缓存不产生网络请求、因而不占额度；缓存失效时配额保护仍然有效（它不依赖 Redis，这正是它必须落在 SQLite 的原因）。周边搜索与步行路线另起了缓存命名空间——既有的 `poi_cache_key` 只看城市与关键词，不含 `types`/`radius`/`offset`，两类结果共用一个键会互相污染。
 
 **11. 路线优化（暴力枚举最短路径）**
 规划完成后，用户可对任意一天点击"优化路线"：后端枚举 daytime 景点全排列，**路程目标只计算景点（daytime + evening）之间的 haversine 距离，餐厅不参与评分**（避免被就餐点位置干扰真实游玩动线），evening 景点固定末位，重算每段 `dist_from_prev_km` 并时间槽顺序对齐后写回 DB。原始排列也在候选内，保证 `best_km ≤ original_km`；若优化距离与原始差距 < 0.05 km 则标记 `improved=false`。支持一键回退到 Agent 原始顺序（`POST /api/plan/revert_day`），前端在首次优化时保存原始 timeline 快照，确保回退数据准确。
@@ -394,6 +400,27 @@ LLM 在用户未提供偏好时偶尔吐出 `null`/`none`/`无`/`不限` 等占�
 
 **15. 持久化 Agent Runtime**
 对话和规划不再依赖单个 HTTP 请求的生命周期。Runtime 为每次操作创建持久化 Run：容量不足时安全排队，运行状态、进度、错误、交互请求和最终结果可查询并通过 SSE 回放；支持取消、重试和 LangGraph interrupt 恢复。当前实现适用于单节点部署，多节点部署边界见 [`docs/agent-runtime.md`](docs/agent-runtime.md)。
+
+**16. 高德配额保护（按服务组分池，发出前预占）**
+高德自 2025-05-20 起取消日配额、改为按「服务组」共享的**月配额**（[公告](https://lbs.amap.com/news/service_amap)）。同一服务组内所有接口、同一账号下所有 Key（含 JS API Key）合计消耗同一份额度，已认证个人开发者的官方额度是基础搜索服务 5,000/月、天气预报 5,000/月、基础LBS服务 150,000/月（[定价页](https://lbs.amap.com/upgrade#price)）。
+
+后端据此把高德调用分成三个**互相独立的池**，每个池在**请求发出前**预占 1 次额度；额度不足时直接拒绝，**一次网络请求都不发出**。计数口径是实际发出的 HTTP 请求数而不是逻辑调用数——现有代码有高德层（最多 4 次）× HTTP 层（最多 3 次）两层重试，按逻辑调用计数会在一次失败搜索上记 1、实际消耗 12。
+
+所有高德 REST 调用收敛到唯一入口 `app/providers/amap/channel.py`，在那里统一做失败分类：**配额类立即失败不重试**（此前 `USER_DAILY_QUERY_OVER_LIMIT` 被归入"可重试"，额度见底时反而加倍索取）、限流类退避重试、`IP_QUERY_OVER_LIMIT` 单独提示需要提工单（官方：封停后无法自动恢复）。配额耗尽时 Run 会给出含池名与重置时刻的原因，而不是通用的"任务执行失败"。
+
+用量落在 SQLite（`data/app.db` 的 `amap_quota_usage` 表），**刻意不挂到 Redis 缓存层**：Redis 是可选依赖，未配置时缓存静默失效，配额保护若随之失效就恰好会在最需要它的环境里没有保护。
+
+> ⚠️ **这是估算，不是对账。** 高德**没有配额查询接口**（官方唯一指引是登录控制台「流量分析 → 配额管理」查看），本地计数只覆盖本服务发出的请求，且从部署那一刻起从 0 开始。要把部署前的消耗补进来，用控制台读数对账：
+>
+> ```bash
+> curl -X POST http://localhost:8000/api/runtime/amap-quota/reconcile \
+>   -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+>   -d '{"bucket": "search", "used": 1234}'
+> ```
+>
+> 只读查看：`GET /api/runtime/amap-quota`。`bucket` 取值 `search` / `weather` / `lbs`。
+
+**前端 JS API Key 不在保护范围内**：`AMap.Map` / `AMap.Driving` 由浏览器直接消费，服务端数不到。当前前端没有使用任何 JS 侧 POI 搜索插件，因此不蚕食紧张的 5,000 搜索池；若将来引入，会静默蚕食。
 
 ---
 

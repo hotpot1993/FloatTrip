@@ -28,7 +28,7 @@
 - [x] 4.4 为成功 Run 按需获取并缓存权威 itinerary 摘要，展示成果预览、打开完整行程和继续修改操作
 - [x] 4.5 为失败、取消和重试关系提供请求保留说明，并将重试显示为关联的新任务而非复活旧任务
 - [x] 4.6 区分普通 composer 消息与指定 Run interaction 回复，在回复模式中显示并可清除目标任务上下文
-- [x] 4.7 为针对活动不可变 Run 的新约束增加显式决策卡，支持停止后重做、完成后修改或取消本次变更
+- [ ] 4.7 为针对活动不可变 Run 的新约束增加显式决策卡，支持停止后重做、完成后修改或取消本次变更（归档核对：只有一段无组件渲染的死样式 `frontend/style.css:1952-1954`，对应条文未落地，见 `openspec/changes/complete-conversation-interaction-gaps/`）
 - [x] 4.8 增加所有 Run 状态、内部循环阶段、等待恢复、完成预览、失败重试与并行任务的前端测试
 
 ## 5. 入口与认证连续性
@@ -45,7 +45,7 @@
 - [x] 6.2 在窄屏下将对话列表改为可展开导航，并验证时间线、任务卡和输入控件不产生横向溢出
 - [x] 6.3 为关键异步状态增加克制的 live region，为卡片标题、表单标签、错误和操作补充可访问语义
 - [x] 6.4 实现认证后、等待用户、错误恢复和任务定位后的焦点管理，并确保所有操作可用键盘完成
-- [x] 6.5 移除默认界面中的技术 ID、内部节点和“Runtime 在线”等实现细节，改用用户可理解文案
+- [ ] 6.5 移除默认界面中的技术 ID、内部节点和“Runtime 在线”等实现细节，改用用户可理解文案（归档核对：技术 ID、`run.id` 与“Runtime 在线”确已移除，但 Run 卡仍渲染 `frontend/components.jsx:7-15` 的 7 站内部循环标签如“规划 ⇄ 评审行程”，四阶段投影从未渲染，见 `openspec/changes/complete-conversation-interaction-gaps/`）
 
 ## 7. 验证与迁移
 
@@ -53,3 +53,16 @@
 - [ ] 7.2 手工验证空状态、普通咨询、缺字段、确认、排队、运行、等待回复、完成、失败、取消和多任务完整流程
 - [x] 7.3 在桌面与移动端视口验证主要流程的视觉层级、滚动、焦点、状态播报和主题兼容
 - [x] 7.4 记录旧 PlanPage 仍被使用的兼容场景，并仅在新对话流达到行为等价后移除默认导航入口
+
+## 归档核对说明（2026-09-16）
+
+归档前逐条核对了本 change 的四个能力规格与代码事实，发现 `tasks.md` 的勾选状态有三处失真。按“交付面等于实际行为”的原则处理如下：
+
+1. **4.7 / 「运行中变更必须显式处理」**：改回未勾，且该条 Requirement 不进入主规格库——它与主规格 `conversational-planning` 的 `Immutable execution snapshot` 语义重叠（连例句都是同一句“不要安排丽江”），而两者描述的行为都尚未实现。
+2. **6.5 / 「进度映射为产品阶段」**：改回未勾，该条 Requirement 不进入主规格库。`PRODUCT_STAGES` 只存在于 `frontend/chat-state.js:234-259` 的 reducer，JSX 中零引用；页面至今渲染 7 站内部循环标签。
+3. **「状态变化可被辅助技术感知」的「任务需要用户回复」Scenario**：该 Scenario 要求播报包含任务名称，而 `frontend/pages.jsx:607-613` 的 live region 文案是硬编码的、不含任务名。Scenario 不进入主规格库，Requirement 与键盘可达性 Scenario 保留。
+
+以上三项连同其他核对发现（认证后恢复目标未覆盖历史行程与画像、前端缺少 DOM 组件测试设施、失败卡不读 `error_public.retryable`）统一记录在 `openspec/changes/complete-conversation-interaction-gaps/`。
+
+归档时同时按主规格分工做了去重：「可编辑的确认摘要」中的“明确确认只创建一个 Run”与 `conversational-planning` 的 `Explicit formal-planning confirmation` 重复，且原措辞要求摘要覆盖“餐饮和出行习惯偏好”，与 `memory-aware-planning-brief` 的 `PlanningBrief 使用动态旅行约束`（三个旧偏好字段已降级为动态约束与兼容读取）冲突，已改写为“覆盖目的地、日期、天数、本次预算以及已收集的动态旅行约束”。
+

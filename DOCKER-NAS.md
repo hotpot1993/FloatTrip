@@ -90,6 +90,26 @@ DEEPSEEK_API_KEY: "<在此填写DeepSeek的Key>"      # ← 替换为真实值
 | `AMAP_JS_SECURITY_CODE` | 空 | 与 JS Key 配套的安全密钥 |
 | `TZ` | `Asia/Shanghai` | 容器时区，影响日志时间显示 |
 | `REDIS_URL` | 空 | 留空自动禁用缓存；启用 Redis 时改为 `redis://redis:6379/0` |
+| `AMAP_QUOTA_SEARCH_LIMIT` | `4750` | 基础搜索服务月配额（官方 5000）。`0` = 不限制 |
+| `AMAP_QUOTA_WEATHER_LIMIT` | `4750` | 天气预报月配额（官方 5000）。`0` = 不限制 |
+| `AMAP_QUOTA_LBS_LIMIT` | `0` | 基础LBS服务月配额。默认不限制（官方 150000） |
+| `AMAP_QUOTA_WARNING_RATIO` | `0.8` | 配额预警阈值比例 |
+
+> ⚠️ **配额保护默认开启，且额度不足时程序会直接拒绝请求、一次都不发出。**
+>
+> 高德自 2025-05-20 起取消日配额、改为按「服务组」共享的**月配额**：同一服务组内所有接口、同一账号下所有 Key（含前端 JS API Key）合计消耗同一份额度。个人认证开发者的**基础搜索服务只有 5,000/月**，而一次 5 天单城市规划就要消耗约 13 次搜索（3 次景点 + 10 次餐饮周边）。
+>
+> **不要为了"让它能跑"而把限额调高或设为 0** —— 那只是把超额推迟到高德那边，届时整个账号的该服务组都会被拒绝，影响范围比本应用更大。
+>
+> 本地计数是**估算**：高德没有配额查询接口，计数从部署那一刻从 0 开始，看不到此前的消耗。NAS 上可用 `curl` 录入控制台读数对账（`bucket` 取 `search` / `weather` / `lbs`，`used` 填**绝对值**）：
+>
+> ```bash
+> curl -s -X POST http://<NAS地址>:8765/api/runtime/amap-quota/reconcile \
+>   -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+>   -d '{"bucket": "search", "used": 1234}'
+> ```
+>
+> 只读查看：`GET /api/runtime/amap-quota`。控制台里的「基础地图定位服务」不计入本项目的任何池（那是前端地图直接消费的），不需要录入。
 
 ---
 

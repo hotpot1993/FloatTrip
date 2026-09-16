@@ -1,94 +1,33 @@
-"""高德地点搜索与 POI 解析。"""
+"""高德地点搜索与 POI 解析。
+
+所有请求经 `app.providers.amap.channel` 发出——那是后端唯一允许发高德请求的
+地方，负责失败分类、额度预占与并发约束。本模块只负责参数拼装、缓存与结果解析。
+"""
 
 from __future__ import annotations
 
 import asyncio
-import time
-import urllib.parse
 from typing import Any
 
-from app.core.cache import get_cached, set_cached, poi_cache_key, POI_TTL
-from app.core.http import http_get_json, http_get_json_async
+from app.core.amap_quota import QuotaBucket
+from app.core.cache import (
+    NEARBY_TTL,
+    POI_TTL,
+    get_cached,
+    nearby_cache_key,
+    poi_cache_key,
+    set_cached,
+)
+from app.providers.amap.channel import call_amap
 from app.providers.amap.client import (
     AMAP_AROUND_SEARCH_URL,
-    AMAP_RATE_LIMIT_INFOS,
     AMAP_TEXT_SEARCH_URL,
-    int_or_none,
 )
 
 ATTRACTION_TYPE = "风景名胜"
 
 
-# ─── 内部辅助 ────────────────────────────────────────────────
-
-def _text_search_raw(url: str) -> list[dict[str, Any]]:
-    """带限流重试的高德文本搜索原始执行，返回 pois 列表。"""
-    for attempt in range(4):
-        data = http_get_json(url)
-        if data.get("status") == "1":
-            pois = data.get("pois", [])
-            return pois if isinstance(pois, list) else []
-        info = str(data.get("info") or "未知错误")
-        if info not in AMAP_RATE_LIMIT_INFOS or attempt >= 3:
-            raise RuntimeError(f"高德搜索失败：{info}")
-        time.sleep(1.2 * (attempt + 1))
-    return []
-
-
-async def _text_search_raw_async(url: str) -> list[dict[str, Any]]:
-    for attempt in range(4):
-        data = await http_get_json_async(url)
-        if data.get("status") == "1":
-            pois = data.get("pois", [])
-            return pois if isinstance(pois, list) else []
-        info = str(data.get("info") or "未知错误")
-        if info not in AMAP_RATE_LIMIT_INFOS or attempt >= 3:
-            raise RuntimeError(f"高德搜索失败：{info}")
-        await asyncio.sleep(1.2 * (attempt + 1))
-    return []
-
-
 # ─── 周边搜索 ────────────────────────────────────────────────
-
-def search_around_pois(
-    location: dict[str, float],
-    api_key: str,
-    *,
-    types: str = "",
-    keyword: str = "",
-    radius: int = 1000,
-    offset: int = 6,
-    max_retries: int = 3,
-) -> list[dict[str, Any]]:
-    """调用高德周边搜索，围绕坐标查找餐饮、景点等 POI。
-    餐饮搜索传 types='餐饮服务'，按分类搜索覆盖所有餐馆；
-    有 types 时不发 keywords（两者语义不同，混用结果偏少）。
-    """
-    params = {
-        "key": api_key,
-        "location": f"{location['lng']},{location['lat']}",
-        "radius": str(radius),
-        "offset": str(offset),
-        "page": "1",
-        "extensions": "all",
-        "output": "json",
-    }
-    if types:
-        params["types"] = types
-    elif keyword:
-        params["keywords"] = keyword
-    url = f"{AMAP_AROUND_SEARCH_URL}?{urllib.parse.urlencode(params)}"
-    for attempt in range(max_retries + 1):
-        data = http_get_json(url)
-        if data.get("status") == "1":
-            pois = data.get("pois", [])
-            return pois if isinstance(pois, list) else []
-        info = str(data.get("info") or "未知错误")
-        if info not in AMAP_RATE_LIMIT_INFOS or attempt >= max_retries:
-            raise RuntimeError(f"高德周边搜索失败：{info}")
-        time.sleep(1.2 * (attempt + 1))
-    return []
-
 
 async def search_around_pois_async(
     location: dict[str, float],
@@ -98,9 +37,24 @@ async def search_around_pois_async(
     keyword: str = "",
     radius: int = 1000,
     offset: int = 6,
-    max_retries: int = 3,
 ) -> list[dict[str, Any]]:
-    params = {
+    """调用高德周边搜索，围绕坐标查找餐饮、景点等 POI。
+
+    餐饮搜索传 types='餐饮服务'，按分类搜索覆盖所有餐馆；
+    有 types 时不发 keywords（两者语义不同，混用结果偏少）。
+
+    结果按坐标 + 半径 + 类型 + 关键词 + 条数缓存：规划里每一天的午晚餐各发一次
+    周边搜索，跨行程复用同一锚点时能直接省下真实额度。
+    """
+    cache_key = nearby_cache_key(
+        location, radius=radius, types=types, keyword=keyword, offset=offset
+    )
+    cached = await asyncio.to_thread(get_cached, cache_key)
+    if cached is not None:
+        # 命中缓存不占额、不发请求——配额层根本不需要知道缓存的存在。
+        return cached
+
+    params: dict[str, Any] = {
         "key": api_key,
         "location": f"{location['lng']},{location['lat']}",
         "radius": str(radius),
@@ -113,22 +67,19 @@ async def search_around_pois_async(
         params["types"] = types
     elif keyword:
         params["keywords"] = keyword
-    url = f"{AMAP_AROUND_SEARCH_URL}?{urllib.parse.urlencode(params)}"
-    for attempt in range(max_retries + 1):
-        data = await http_get_json_async(url)
-        if data.get("status") == "1":
-            pois = data.get("pois", [])
-            return pois if isinstance(pois, list) else []
-        info = str(data.get("info") or "未知错误")
-        if info not in AMAP_RATE_LIMIT_INFOS or attempt >= max_retries:
-            raise RuntimeError(f"高德周边搜索失败：{info}")
-        await asyncio.sleep(1.2 * (attempt + 1))
-    return []
+
+    data = await call_amap(AMAP_AROUND_SEARCH_URL, params, QuotaBucket.SEARCH)
+    pois = data.get("pois", [])
+    result = pois if isinstance(pois, list) else []
+    # 失败响应不会走到这里（通道会抛异常），所以写进缓存的一定是成功结果。
+    if result:
+        await asyncio.to_thread(set_cached, cache_key, result, NEARBY_TTL)
+    return result
 
 
 # ─── 景点关键字搜索 ──────────────────────────────────────────
 
-def search_attraction_pois(
+async def search_attraction_pois_async(
     city: str,
     api_key: str,
     *,
@@ -140,42 +91,11 @@ def search_attraction_pois(
     # 缓存逻辑：仅缓存 page=1 的请求
     cache_key = poi_cache_key(city, keywords) if page == 1 else None
     if cache_key is not None:
-        cached = get_cached(cache_key)
-        if cached is not None:
-            return cached
-
-    params: dict[str, str] = {
-        "key": api_key,
-        "keywords": keywords,
-        "types": ATTRACTION_TYPE,
-        "city": city,
-        "citylimit": "true",
-        "offset": str(offset),
-        "page": str(page),
-        "extensions": "all",
-        "output": "json",
-    }
-    url = f"{AMAP_TEXT_SEARCH_URL}?{urllib.parse.urlencode(params)}"
-    pois = _text_search_raw(url)
-    if page == 1 and pois:
-        set_cached(cache_key, pois, POI_TTL)
-    return pois
-
-
-async def search_attraction_pois_async(
-    city: str,
-    api_key: str,
-    *,
-    keywords: str = "景点",
-    offset: int = 25,
-    page: int = 1,
-) -> list[dict[str, Any]]:
-    cache_key = poi_cache_key(city, keywords) if page == 1 else None
-    if cache_key is not None:
         cached = await asyncio.to_thread(get_cached, cache_key)
         if cached is not None:
             return cached
-    params: dict[str, str] = {
+
+    params: dict[str, Any] = {
         "key": api_key,
         "keywords": keywords,
         "types": ATTRACTION_TYPE,
@@ -186,14 +106,15 @@ async def search_attraction_pois_async(
         "extensions": "all",
         "output": "json",
     }
-    url = f"{AMAP_TEXT_SEARCH_URL}?{urllib.parse.urlencode(params)}"
-    pois = await _text_search_raw_async(url)
-    if page == 1 and pois:
-        await asyncio.to_thread(set_cached, cache_key, pois, POI_TTL)
-    return pois
+    data = await call_amap(AMAP_TEXT_SEARCH_URL, params, QuotaBucket.SEARCH)
+    pois = data.get("pois", [])
+    result = pois if isinstance(pois, list) else []
+    if page == 1 and result and cache_key is not None:
+        await asyncio.to_thread(set_cached, cache_key, result, POI_TTL)
+    return result
 
 
-def search_city_pois(
+async def search_city_pois_async(
     city: str,
     api_key: str,
     *,
@@ -201,8 +122,11 @@ def search_city_pois(
     types: str,
     offset: int = 8,
 ) -> list[dict[str, Any]]:
-    """通用城市关键字搜索（手动编辑换点用）：类型可指定（景点/餐饮），不做缓存（由调用方决定）。"""
-    params: dict[str, str] = {
+    """通用城市关键字搜索（手动编辑换点用）。
+
+    不做缓存：由调用方决定缓存粒度（`/api/poi/search` 会按 kind 与关键词缓存）。
+    """
+    params: dict[str, Any] = {
         "key": api_key,
         "keywords": keywords,
         "types": types,
@@ -213,8 +137,9 @@ def search_city_pois(
         "extensions": "all",
         "output": "json",
     }
-    url = f"{AMAP_TEXT_SEARCH_URL}?{urllib.parse.urlencode(params)}"
-    return _text_search_raw(url)
+    data = await call_amap(AMAP_TEXT_SEARCH_URL, params, QuotaBucket.SEARCH)
+    pois = data.get("pois", [])
+    return pois if isinstance(pois, list) else []
 
 
 # ─── POI 解析 ────────────────────────────────────────────────

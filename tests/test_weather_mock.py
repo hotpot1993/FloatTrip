@@ -4,7 +4,7 @@ r"""雨天 mock 测试（无侵入式）。
     cd /Users/chj/Desktop/new tripagent
     python -m tests.test_weather_mock
 
-通过 unittest.mock.patch 在运行时替换 fetch_forecast，
+通过 unittest.mock.patch 在运行时替换 fetch_forecast_async，
 不修改任何生产代码。验证天气信息能正确流入规划流水线。
 """
 from __future__ import annotations
@@ -18,8 +18,12 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-def _rainy_forecast(city: str, api_key: str) -> list[dict]:
-    """Mock：第 2 天为中雨，其余晴天。"""
+async def _rainy_forecast(city: str, api_key: str) -> list[dict]:
+    """Mock：第 2 天为中雨，其余晴天。
+
+    高德天气调用现在是异步的（经 app.providers.amap.channel），所以替身也必须是
+    协程函数——同步替身会在 await 处直接报 TypeError。
+    """
     today = date.today()
     return [
         {
@@ -39,7 +43,7 @@ def run_test():
     end   = (date.today() + timedelta(3)).isoformat()
     query = f"去南京3日游，{start}出发，{end}结束，喜欢历史古迹"
 
-    with patch("app.providers.weather.amap.fetch_forecast", side_effect=_rainy_forecast):
+    with patch("app.providers.weather.amap.fetch_forecast_async", side_effect=_rainy_forecast):
         from app.planning.graph import build_graph
         from app.planning.state import TravelPlanState
         _app = build_graph()

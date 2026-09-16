@@ -62,4 +62,8 @@ docker-compose.yaml
 build.sh
 build.ps1
 DOCKER.md
+DOCKER-NAS.md
 .gitattributes
+
+# 开发期验收脚本（例如高德配额的端到端验证）：它们在宿主机上跑，不在容器里
+scripts

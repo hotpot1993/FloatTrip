@@ -52,6 +52,20 @@ Copy-Item .env.example .env
 | `AMAP_JS_KEY` | 可选 | 高德 **Web 端(JS API)** Key，用于前端地图可视化，缺失则地图降级 |
 | `AMAP_JS_SECURITY_CODE` | 可选 | 与 JS Key 配套的安全密钥 |
 | `REDIS_URL` | 可选 | 留空则自动禁用缓存，不影响主流程 |
+| `AMAP_QUOTA_SEARCH_LIMIT` | 可选 | 基础搜索服务月配额，默认 4750（官方 5000）。`0` = 不限制 |
+| `AMAP_QUOTA_WEATHER_LIMIT` | 可选 | 天气预报月配额，默认 4750（官方 5000）。`0` = 不限制 |
+| `AMAP_QUOTA_LBS_LIMIT` | 可选 | 基础LBS服务月配额，默认 `0`（不限制）。官方 150000 |
+| `AMAP_QUOTA_WARNING_RATIO` | 可选 | 配额预警阈值比例，默认 `0.8` |
+
+> **配额保护默认开启。** 高德自 2025-05-20 起按「服务组」共享月配额，个人认证开发者的基础搜索服务只有 5,000/月，而一次 5 天单城市规划就要消耗 13 次搜索。额度不足时程序会**直接拒绝请求、一次都不发出**，并在对话里给出含池名与重置时刻的原因。
+>
+> 本地计数是**估算**：高德没有配额查询接口，计数从部署那一刻从 0 开始，看不到此前的消耗。要把部署前的用量补进来，用控制台读数对账（详见 [README 的配额保护一节](README.md)）：
+>
+> ```bash
+> curl -X POST http://localhost:8000/api/runtime/amap-quota/reconcile \
+>   -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
+>   -d '{"bucket": "search", "used": 1234}'
+> ```
 
 > `.env` 已被 `.gitignore` 与 `.dockerignore` 双重排除，不会提交仓库，也不会进入镜像。
 

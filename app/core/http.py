@@ -94,11 +94,20 @@ async def close_async_http_client() -> None:
         _async_client = None
 
 
-async def http_get_json_async(url: str, timeout: int = 15) -> dict[str, Any]:
+async def http_get_json_async(
+    url: str, timeout: int = 15, max_attempts: int = 3
+) -> dict[str, Any]:
+    """发起 GET 请求并解析 JSON。
+
+    `max_attempts` 允许调用方接管重试：高德调用通道需要在**每次**重试前预占
+    配额，而重试若埋在本函数的循环里，计数点就看不见它。通道因此传 1，
+    由它自己驱动退避与占额。
+    """
     client = await get_async_http_client()
+    attempts = max(1, max_attempts)
     last_error: Exception | None = None
     async with provider_slot("amap"):
-        for attempt in range(3):
+        for attempt in range(attempts):
             try:
                 response = await client.get(url, timeout=timeout)
                 response.raise_for_status()
@@ -108,6 +117,6 @@ async def http_get_json_async(url: str, timeout: int = 15) -> dict[str, Any]:
                 return data
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
-                if attempt < 2:
+                if attempt < attempts - 1:
                     await asyncio.sleep(0.8 * (attempt + 1))
     raise RuntimeError(f"请求失败：{redact_url(url)}；原因：{last_error}")

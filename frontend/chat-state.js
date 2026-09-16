@@ -184,6 +184,113 @@
     return isConcreteTime(text) ? text : `${text}（未提供具体时刻）`;
   }
 
+  // 提问清单的「哪些字段、什么顺序」由服务端说了算（brief.answered_fields /
+  // brief.question），前端只负责把它们说成人话。服务端将来加了字段而这里还
+  // 没跟上时，标签会退化成字段名而不是报错。
+  const BRIEF_FIELD_LABELS = {
+    destination: "目的地",
+    date_range: "出行日期",
+    arrival_time: "抵达时刻",
+    departure_time: "返程时刻",
+    trip_budget: "本次预算",
+    preferences: "旅行偏好",
+  };
+
+  function briefFieldValue(field, data) {
+    const payload = data || {};
+    if (field === "destination") return String(payload.destination || "").trim();
+    if (field === "date_range") {
+      if (payload.start_date && payload.end_date) {
+        return `${payload.start_date} — ${payload.end_date}`;
+      }
+      return payload.days ? `${payload.days} 天` : "";
+    }
+    if (field === "arrival_time" || field === "departure_time") {
+      return String(payload[field] || "").trim();
+    }
+    if (field === "trip_budget") {
+      return String(payload.trip_budget || payload.budget || "").trim();
+    }
+    if (field === "preferences") {
+      return (payload.trip_constraints || [])
+        .map(item => String(item?.value_text || "").trim())
+        .filter(Boolean)
+        .join("、");
+    }
+    return "";
+  }
+
+  // brief.answered_fields 已经按清单顺序列出「已答或已跳过」的字段，
+  // 因此这里不再自己排序，也不会漏掉任何一项。
+  function briefFieldRecords(brief) {
+    const data = brief?.data || {};
+    const declined = new Set(brief?.declined_fields || []);
+    return (brief?.answered_fields || []).map(field => {
+      const skipped = declined.has(field);
+      return {
+        field,
+        label: BRIEF_FIELD_LABELS[field] || field,
+        skipped,
+        value: skipped ? "" : briefFieldValue(field, data),
+      };
+    });
+  }
+
+  function briefProgressLabel(brief) {
+    const question = brief?.question;
+    if (!question || brief?.collected) return "";
+    const remaining = Number(question.remaining || 0);
+    return remaining > 0 ? `还差 ${remaining} 项` : "";
+  }
+
+  // 一条 brief 派生出多个时间线条目：每个已处理字段一行「已记录」、当前提问
+  // 一张卡片、收集完成后一张需求摘要。key 全部由 brief id 与字段名拼成，
+  // 因此事件重放或刷新重建都不会产生第二份。
+  function briefDerivedItems(entity) {
+    const anchor = entity.created_at || entity.updated_at || "";
+    const items = [];
+    briefFieldRecords(entity).forEach((record, index) => {
+      items.push({
+        key: `brief-record:${entity.id}:${record.field}`,
+        type: "brief_record",
+        entityId: entity.id,
+        entity: { ...record, briefId: entity.id },
+        createdAt: anchor,
+        sequence: Number.MAX_SAFE_INTEGER,
+        derivedOrder: index,
+      });
+    });
+    if (entity.question && !entity.collected) {
+      items.push({
+        key: `brief-question:${entity.id}:${entity.question.field}`,
+        type: "brief_question",
+        entityId: entity.id,
+        entity: {
+          ...entity.question,
+          briefId: entity.id,
+          status: entity.status,
+          progress: briefProgressLabel(entity),
+          options: entity.question.options || [],
+        },
+        createdAt: anchor,
+        sequence: Number.MAX_SAFE_INTEGER,
+        derivedOrder: items.length,
+      });
+    }
+    if (entity.collected) {
+      items.push({
+        key: `brief:${entity.id}`,
+        type: "brief",
+        entityId: entity.id,
+        entity,
+        createdAt: anchor,
+        sequence: Number.MAX_SAFE_INTEGER,
+        derivedOrder: items.length,
+      });
+    }
+    return items;
+  }
+
   function briefViewModel(brief) {
     const data = brief?.data || {};
     const missingLabels = {
@@ -267,23 +374,22 @@
         type: "message",
         entityId: id,
         entity,
+        clarification: entity.role === "assistant"
+          ? (state.runs[entity.related_run_id]?.clarification || null)
+          : null,
         createdAt: entity.created_at || "",
         sequence: Number(entity.sequence || Number.MAX_SAFE_INTEGER),
       });
     });
     Object.values(state.briefs).forEach((entity) => {
       if (!entity || entity.status === "discarded") return;
-      items.push({
-        key: `brief:${entity.id}`,
-        type: "brief",
-        entityId: entity.id,
-        entity,
-        createdAt: entity.created_at || entity.updated_at || "",
-        sequence: Number.MAX_SAFE_INTEGER,
-      });
+      briefDerivedItems(entity).forEach(item => items.push(item));
     });
-    Object.values(state.runs).forEach((entity) => {
-      if (!entity) return;
+    Object.entries(state.runs).forEach(([runKey, stored]) => {
+      if (!stored) return;
+      // 事件可能先于 listRuns 到达，此时 runs[runId] 只有事件写入的字段、没有 id。
+      // 用 map 的键兜底，否则派生的 key 会变成 "run:undefined"。
+      const entity = stored.id ? stored : { ...stored, id: runKey };
       if (entity.kind === "chat") {
         if (["queued", "running"].includes(entity.status)) {
           items.push({
@@ -315,8 +421,25 @@
         createdAt: entity.created_at || entity.queued_at || entity.updated_at || "",
         sequence: Number.MAX_SAFE_INTEGER,
       });
+      // 配额预警是这条 Run 的旁路信息，不是独立实体：挂在同一 entityId 上，
+      // 靠 derivedOrder 保证它排在任务卡之前。没有预警时不产生任何条目。
+      if (entity.quota_warning) {
+        items.push({
+          key: `quota-warning:${entity.id}`,
+          type: "quota_warning",
+          entityId: entity.id,
+          entity,
+          createdAt: entity.created_at || entity.queued_at || entity.updated_at || "",
+          sequence: Number.MAX_SAFE_INTEGER,
+          derivedOrder: -1,
+        });
+      }
     });
-    const typePriority = { message: 0, chat_thinking: 1, brief: 2, run: 3, chat_failure: 4 };
+    const typePriority = {
+      message: 0, chat_thinking: 1,
+      brief_record: 2, brief_question: 3, brief: 4,
+      quota_warning: 5, run: 6, chat_failure: 7,
+    };
     return items.sort((left, right) => {
       if (left.type === "message" && right.type === "message" && left.sequence !== right.sequence) {
         return left.sequence - right.sequence;
@@ -326,6 +449,15 @@
       }
       if (left.createdAt !== right.createdAt) return left.createdAt ? -1 : 1;
       if (left.sequence !== right.sequence) return left.sequence - right.sequence;
+      // 同一条 brief 派生出的条目共享锚点与 sequence，只能靠派生顺序区分：
+      // 已记录在前、当前提问次之、需求摘要最后。
+      if (
+        Number.isInteger(left.derivedOrder)
+        && Number.isInteger(right.derivedOrder)
+        && left.entityId === right.entityId
+      ) {
+        return left.derivedOrder - right.derivedOrder;
+      }
       if (typePriority[left.type] !== typePriority[right.type]) {
         return typePriority[left.type] - typePriority[right.type];
       }
@@ -369,20 +501,35 @@
           streaming: false,
         });
       } else if (String(payload.kind || "").startsWith("planning_brief.")) {
+        const previous = next.briefs[payload.brief_id] || {};
+        const incoming = {
+          ...previous,
+          id: payload.brief_id,
+          status: payload.status,
+          data: payload.summary || {},
+          missing_fields: payload.missing_fields || [],
+          memory_context: payload.memory_context || previous.memory_context,
+          effective_constraints: payload.effective_constraints || [],
+          constraint_coverage: payload.constraint_coverage || [],
+        };
+        // 提问投影只在这条事件确实带了它的时候覆盖。终态事件（submitted /
+        // discarded）不带提问，用空值覆盖会把已有的跳过记录抹掉，表现为
+        // 用户重启对话后被重新问一遍。
+        ["question", "collected", "declined_fields", "answered_fields"].forEach(key => {
+          if (key in payload) incoming[key] = payload[key];
+        });
         next = {
           ...next,
-          briefs: {
-            ...next.briefs,
-            [payload.brief_id]: {
-              ...next.briefs[payload.brief_id],
-              id: payload.brief_id,
-              status: payload.status,
-              data: payload.summary || {},
-              missing_fields: payload.missing_fields || [],
-              memory_context: payload.memory_context || next.briefs[payload.brief_id]?.memory_context,
-              effective_constraints: payload.effective_constraints || [],
-              constraint_coverage: payload.constraint_coverage || [],
-            },
+          briefs: { ...next.briefs, [payload.brief_id]: incoming },
+        };
+      } else if (payload.kind === "chat.clarification") {
+        // 澄清的候选项是实时增强：它不落库，刷新后同一条助手消息退化成
+        // 普通气泡，问题文本本身不会丢。
+        next = {
+          ...next,
+          runs: {
+            ...next.runs,
+            [runId]: { ...(next.runs[runId] || {}), clarification: payload },
           },
         };
       } else if (payload.kind === "run.created" && payload.run?.id) {
@@ -408,6 +555,17 @@
         const stagedRun = payload.kind === "planning_run.progress"
           ? advanceRunStage(currentRun, payload.stage, payload.label)
           : currentRun;
+        // 高德配额预警：整轮规划只需要知道「当前有没有未处理的预警」，
+        // 所以只留最后一条，不堆叠历史。
+        const quotaWarning = payload.kind === "amap.quota_warning"
+          ? {
+              bucket: payload.bucket,
+              used: payload.used,
+              limit: payload.limit,
+              remaining: payload.remaining,
+              message: payload.message,
+            }
+          : currentRun.quota_warning;
         const itineraryResult = payload.kind === "planning.itinerary_created"
           ? {
               result_itinerary_id: payload.itinerary_id,
@@ -428,6 +586,7 @@
               ...itineraryResult,
               ...(payload.kind === "run.status" ? { status: payload.status } : {}),
               pending_interaction: pendingInteraction,
+              quota_warning: quotaWarning,
               last_event: payload,
             },
           },
@@ -455,6 +614,11 @@
     interactionInputKind,
     memoryFactPresentation,
     briefViewModel,
+    briefFieldRecords,
+    briefFieldValue,
+    briefProgressLabel,
+    briefDerivedItems,
+    BRIEF_FIELD_LABELS,
     RUN_PRESENTATIONS,
     PRODUCT_STAGES,
     planningBriefStatusLabel,

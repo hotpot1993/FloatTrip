@@ -14,11 +14,11 @@ def test_frontend_html_disables_cache_and_versions_all_local_assets():
         "tweaks-panel.jsx", "mascot.jsx", "components.jsx", "edit.jsx",
         "pages.jsx", "main.jsx",
     ):
-        assert f'/{asset}?v=20260807-conversation-attention' in html
+        assert f'/{asset}?v=20260916-guided-trip-questions' in html
 
 
 def test_frontend_scripts_are_revalidated():
-    response = TestClient(app).get("/pages.jsx?v=20260807-conversation-attention")
+    response = TestClient(app).get("/pages.jsx?v=20260916-guided-trip-questions")
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-cache, must-revalidate"

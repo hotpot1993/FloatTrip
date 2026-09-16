@@ -483,3 +483,109 @@ class RuntimeApiTests(unittest.TestCase):
             self.client.get("/api/profile", headers=self.owner_headers).json()["active_facts"],
             [],
         )
+
+    def test_typed_answers_drive_the_question_sequence(self):
+        """候选项回答不经过语言模型：它只能答当前那一题，答完立刻推进。"""
+        from app.runtime.repositories import ConversationRepository, PlanningBriefRepository
+
+        conversation = ConversationRepository().create("owner")
+        brief = PlanningBriefRepository().upsert_active("owner", conversation["id"], {})
+        self.assertEqual(brief["question"]["field"], "destination")
+        self.assertFalse(brief["collected"])
+        answers = f"/api/planning-briefs/{brief['id']}/answers"
+
+        def answer(field, value, headers=None):
+            return self.client.post(
+                answers,
+                headers=headers or self.owner_headers,
+                json={"field": field, "value": value},
+            )
+
+        # 必填不能跳过，也不能答非所问。
+        self.assertEqual(answer("destination", None).status_code, 422)
+        self.assertEqual(answer("trip_budget", "6000").status_code, 409)
+        self.assertEqual(
+            answer("destination", "丽江", headers=self.other_headers).status_code, 404
+        )
+
+        first = answer("destination", "  丽江  ")
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["data"]["destination"], "丽江")
+        self.assertEqual(first.json()["question"]["field"], "date_range")
+        self.assertEqual(first.json()["question"]["remaining"], 5)
+
+        # 非法日期被拒，且不改变需求单。
+        self.assertEqual(
+            answer("date_range", {"start_date": "2026-11-11", "end_date": "2026-11-07"}).status_code,
+            422,
+        )
+        dates = answer("date_range", {"start_date": "2026-11-07", "end_date": "2026-11-11"})
+        self.assertEqual(dates.status_code, 200)
+        self.assertEqual(dates.json()["status"], "ready")
+        # 必填齐了但提问还没走完：摘要不该出现。
+        self.assertFalse(dates.json()["collected"])
+
+        for field in ("arrival_time", "departure_time", "trip_budget"):
+            skipped = answer(field, None)
+            self.assertEqual(skipped.status_code, 200)
+            self.assertIn(field, skipped.json()["declined_fields"])
+        self.assertEqual(dates.json()["question"]["field"], "arrival_time")
+
+        last = answer("preferences", ["自然风光", "美食"])
+        self.assertEqual(last.status_code, 200)
+        body = last.json()
+        self.assertTrue(body["collected"])
+        self.assertIsNone(body["question"])
+        self.assertEqual(
+            [item["value_text"] for item in body["data"]["trip_constraints"]],
+            ["自然风光", "美食"],
+        )
+
+        # 收集完成之后不再接受回答。
+        self.assertEqual(answer("arrival_time", "傍晚").status_code, 409)
+
+    def test_answers_are_rejected_once_the_brief_is_submitted(self):
+        from app.runtime.repositories import ConversationRepository, PlanningBriefRepository
+
+        conversation = ConversationRepository().create("owner")
+        brief = PlanningBriefRepository().upsert_active(
+            "owner", conversation["id"],
+            {"destination": "云南", "start_date": "2026-10-01", "end_date": "2026-10-05"},
+        )
+        with patch("app.api.runtime_routes.scheduler.notify"):
+            submitted = self.client.post(
+                f"/api/planning-briefs/{brief['id']}/submit", headers=self.owner_headers
+            )
+        self.assertEqual(submitted.status_code, 202)
+        response = self.client.post(
+            f"/api/planning-briefs/{brief['id']}/answers",
+            headers=self.owner_headers,
+            json={"field": "arrival_time", "value": "傍晚"},
+        )
+        self.assertEqual(response.status_code, 409)
+        # 关键：被拒绝的回答不能悄悄新建第二条 brief（部分唯一索引只允许一条）。
+        self.assertEqual(
+            self.client.get(
+                f"/api/conversations/{conversation['id']}/planning-brief",
+                headers=self.owner_headers,
+            ).json(),
+            None,
+        )
+
+    def test_brief_projection_exposes_the_current_question(self):
+        from app.runtime.repositories import ConversationRepository, PlanningBriefRepository
+
+        conversation = ConversationRepository().create("owner")
+        PlanningBriefRepository().upsert_active(
+            "owner", conversation["id"], {"destination": "云南"}
+        )
+        body = self.client.get(
+            f"/api/conversations/{conversation['id']}/planning-brief",
+            headers=self.owner_headers,
+        ).json()
+        self.assertEqual(body["question"]["field"], "date_range")
+        self.assertEqual(body["question"]["total"], 6)
+        self.assertEqual(body["answered_fields"], ["destination"])
+        self.assertEqual(body["declined_fields"], [])
+        self.assertFalse(body["collected"])
+        self.assertEqual(body["missing_fields"], ["start_date", "end_date"])

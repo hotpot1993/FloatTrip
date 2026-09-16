@@ -28,13 +28,15 @@ _checkpoint_path = Path(
 _checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 manager = RunManager()
 chat_service = ChatService(manager)
+# 调度器不再接收 amap_limit：它曾经收下并存在一个没人读的字段里，
+# 而真正生效的 AMap 并发约束在 app/core/async_resources.py，读的是同一个
+# RUNTIME_AMAP_CONCURRENCY。两处同名会让人误以为限流点在调度器。
 scheduler = RuntimeScheduler(
     manager,
     chat_limit=int(os.getenv("RUNTIME_CHAT_CONCURRENCY", "8")),
     planning_limit=int(os.getenv("RUNTIME_PLANNING_CONCURRENCY", "2")),
     planning_per_user=int(os.getenv("RUNTIME_PLANNING_PER_USER", "2")),
     llm_limit=int(os.getenv("RUNTIME_LLM_CONCURRENCY", "8")),
-    amap_limit=int(os.getenv("RUNTIME_AMAP_CONCURRENCY", "8")),
 )
 
 checkpointer: AsyncSqliteSaver | None = None

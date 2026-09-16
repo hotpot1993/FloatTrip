@@ -308,6 +308,7 @@ test("projects messages, briefs, non-chat runs, and failed chat retries into one
   });
   state.briefs["brief-1"] = {
     id: "brief-1", status: "ready", data: { destination: "云南" },
+    answered_fields: [], declined_fields: [], question: null, collected: true,
     created_at: "2026-07-23T10:00:01Z",
   };
   state.runs["chat-run"] = {
@@ -335,7 +336,10 @@ test("keeps activity order stable after entity updates and reconstruction", () =
       sequence: 2, created_at: "2026-07-23T10:00:00Z",
     });
     state.briefs.b = {
-      id: "b", status: "collecting", data: {},
+      id: "b", status: "collecting", data: { destination: "云南" },
+      answered_fields: ["destination"], declined_fields: [],
+      question: { field: "date_range", label: "出行日期", remaining: 5, total: 6 },
+      collected: false,
       created_at: "2026-07-23T10:00:01Z",
       updated_at: "2026-07-23T10:05:00Z",
     };
@@ -495,3 +499,302 @@ test("describes every run terminal and non-terminal state with an action", () =>
   assert.equal(ChatState.RUN_PRESENTATIONS.waiting_user.primaryAction, "resume");
   assert.equal(ChatState.RUN_PRESENTATIONS.failed.primaryAction, "retry");
 });
+
+// --- 字段提问：一条 brief 派生多个时间线条目 ---------------------------------
+
+function collectingBrief(overrides = {}) {
+  return {
+    id: "brief-q", status: "collecting",
+    data: { destination: "丽江" },
+    answered_fields: ["destination"],
+    declined_fields: [],
+    question: {
+      field: "date_range", label: "出行日期", question: "打算哪天出发、哪天回来？",
+      kind: "date_range", options: [], optional: false, remaining: 5, total: 6,
+    },
+    collected: false,
+    created_at: "2026-07-23T10:00:01Z",
+    ...overrides,
+  };
+}
+
+test("still shows the trip note before the server sends the question projection", () => {
+  // 兼容性护栏：缺 collected 字段的旧载荷不能因为本次改动而整张卡消失。
+  let state = ChatState.initialState();
+  state.briefs.legacy = { id: "legacy", status: "ready", data: { destination: "云南" } };
+  const items = ChatState.activityItems(state).filter(item => item.type === "brief");
+  assert.equal(items.length, 0);
+
+  state.briefs.legacy = { ...state.briefs.legacy, collected: true };
+  assert.deepEqual(
+    ChatState.activityItems(state).filter(item => item.type === "brief").map(item => item.key),
+    ["brief:legacy"],
+  );
+});
+
+test("derives one record per handled field plus the current question", () => {
+  const state = ChatState.initialState();
+  state.briefs["brief-q"] = collectingBrief({
+    answered_fields: ["destination", "arrival_time", "departure_time"],
+    declined_fields: ["arrival_time"],
+    data: { destination: "丽江", arrival_time: "", departure_time: "15:00" },
+  });
+  assert.deepEqual(
+    ChatState.activityItems(state).map(item => item.key),
+    [
+      "brief-record:brief-q:destination",
+      "brief-record:brief-q:arrival_time",
+      "brief-record:brief-q:departure_time",
+      "brief-question:brief-q:date_range",
+    ],
+  );
+  const records = ChatState.activityItems(state).filter(item => item.type === "brief_record");
+  assert.deepEqual(records.map(item => item.entity.label), ["目的地", "抵达时刻", "返程时刻"]);
+  assert.deepEqual(records.map(item => item.entity.value), ["丽江", "", "15:00"]);
+  assert.deepEqual(records.map(item => item.entity.skipped), [false, true, false]);
+});
+
+test("replaces the question item in place instead of appending a new one", () => {
+  const state = ChatState.initialState();
+  state.briefs["brief-q"] = collectingBrief();
+  const first = ChatState.activityItems(state).filter(item => item.type === "brief_question");
+  assert.equal(first.length, 1);
+  assert.equal(first[0].entity.remaining, 5);
+
+  state.briefs["brief-q"] = collectingBrief({
+    data: { destination: "丽江", start_date: "2026-11-07", end_date: "2026-11-11" },
+    answered_fields: ["destination", "date_range"],
+    question: { field: "arrival_time", label: "抵达时刻", remaining: 4, total: 6 },
+  });
+  const second = ChatState.activityItems(state).filter(item => item.type === "brief_question");
+  assert.equal(second.length, 1);
+  assert.equal(second[0].key, "brief-question:brief-q:arrival_time");
+  assert.equal(second[0].entity.progress, "还差 4 项");
+  assert.deepEqual(
+    ChatState.activityItems(state).map(item => item.key),
+    [
+      "brief-record:brief-q:destination",
+      "brief-record:brief-q:date_range",
+      "brief-question:brief-q:arrival_time",
+    ],
+  );
+});
+
+test("swaps the question for the trip note once collection completes", () => {
+  const state = ChatState.initialState();
+  state.briefs["brief-q"] = collectingBrief({
+    status: "ready",
+    data: { destination: "丽江", start_date: "2026-11-07", end_date: "2026-11-11" },
+    answered_fields: ["destination", "date_range", "arrival_time", "departure_time",
+      "trip_budget", "preferences"],
+    declined_fields: ["arrival_time", "departure_time", "trip_budget", "preferences"],
+    question: null,
+    collected: true,
+  });
+  const keys = ChatState.activityItems(state).map(item => item.key);
+  assert.equal(keys.filter(key => key.startsWith("brief-question")).length, 0);
+  assert.equal(keys[keys.length - 1], "brief:brief-q");
+});
+
+test("drops every derived item for a discarded brief", () => {
+  const state = ChatState.initialState();
+  state.briefs["brief-q"] = collectingBrief({ status: "discarded" });
+  assert.deepEqual(ChatState.activityItems(state), []);
+});
+
+test("keeps derived keys stable when the same events replay", () => {
+  const build = () => {
+    let state = ChatState.initialState();
+    state = ChatState.applyEvent(state, "chat-run", {
+      kind: "custom", sequence: 1,
+      payload: {
+        kind: "planning_brief.updated", brief_id: "brief-q", status: "collecting",
+        summary: { destination: "丽江" },
+        missing_fields: ["start_date", "end_date"],
+        answered_fields: ["destination"], declined_fields: [], collected: false,
+        question: { field: "date_range", label: "出行日期", remaining: 5, total: 6 },
+      },
+    });
+    return state;
+  };
+  const before = build();
+  // 重放同一条事件必须幂等。
+  const replayed = ChatState.applyEvent(before, "chat-run", {
+    kind: "custom", sequence: 1,
+    payload: {
+      kind: "planning_brief.updated", brief_id: "brief-q", status: "collecting",
+      summary: { destination: "丽江" },
+      missing_fields: ["start_date", "end_date"],
+      answered_fields: ["destination"], declined_fields: [], collected: false,
+      question: { field: "date_range", label: "出行日期", remaining: 5, total: 6 },
+    },
+  });
+  assert.deepEqual(
+    ChatState.activityItems(replayed).map(item => item.key),
+    ChatState.activityItems(build()).map(item => item.key),
+  );
+});
+
+test("keeps the question projection when a terminal event omits it", () => {
+  let state = ChatState.initialState();
+  state = ChatState.applyEvent(state, "chat-run", {
+    kind: "custom", sequence: 1,
+    payload: {
+      kind: "planning_brief.updated", brief_id: "b", status: "collecting",
+      summary: { destination: "丽江" },
+      answered_fields: ["destination"], declined_fields: ["arrival_time"],
+      collected: false,
+      question: { field: "date_range", label: "出行日期", remaining: 5, total: 6 },
+    },
+  });
+  // 终态事件不带提问字段：不能用空值把已有状态抹掉。
+  state = ChatState.applyEvent(state, "chat-run", {
+    kind: "custom", sequence: 2,
+    payload: {
+      kind: "planning_brief.submitted", brief_id: "b", status: "submitted",
+      summary: { destination: "丽江" }, missing_fields: [],
+    },
+  });
+  const brief = state.briefs.b;
+  assert.deepEqual(brief.declined_fields, ["arrival_time"]);
+  assert.deepEqual(brief.answered_fields, ["destination"]);
+  assert.equal(brief.question.field, "date_range");
+  assert.equal(brief.collected, false);
+});
+
+test("formats each handled field the way the summary reads it", () => {
+  const brief = collectingBrief({
+    data: {
+      destination: "丽江",
+      start_date: "2026-11-07", end_date: "2026-11-11", days: 5,
+      arrival_time: "傍晚", departure_time: "15:00",
+      trip_budget: "6000 元",
+      trip_constraints: [{ id: "c", category: "food_preference", value_text: "美食", polarity: "prefer" }],
+    },
+    answered_fields: ["destination", "date_range", "arrival_time", "departure_time",
+      "trip_budget", "preferences"],
+  });
+  const values = Object.fromEntries(
+    ChatState.briefFieldRecords(brief).map(record => [record.field, record.value])
+  );
+  assert.deepEqual(values, {
+    destination: "丽江",
+    date_range: "2026-11-07 — 2026-11-11",
+    arrival_time: "傍晚",
+    departure_time: "15:00",
+    trip_budget: "6000 元",
+    preferences: "美食",
+  });
+});
+
+test("falls back to the raw field id for a question the frontend does not know", () => {
+  const brief = collectingBrief({
+    answered_fields: ["destination", "visa_note"],
+    data: { destination: "丽江" },
+  });
+  const labels = ChatState.briefFieldRecords(brief).map(record => record.label);
+  assert.deepEqual(labels, ["目的地", "visa_note"]);
+});
+
+test("reports how many questions are left", () => {
+  assert.equal(ChatState.briefProgressLabel(collectingBrief()), "还差 5 项");
+  assert.equal(ChatState.briefProgressLabel(collectingBrief({ collected: true, question: null })), "");
+  assert.equal(ChatState.briefProgressLabel({ id: "x", data: {} }), "");
+});
+
+// --- 澄清提问与字段提问呈现一致 ---------------------------------------------
+
+test("attaches live clarification options to the assistant message", () => {
+  let state = ChatState.initialState();
+  state.runs["chat-run"] = { id: "chat-run", kind: "chat", created_at: "2026-07-23T10:00:00Z" };
+  state = ChatState.upsertMessage(state, {
+    id: "assistant-clarify", role: "assistant",
+    content: "我找到了多个可能的行程，请先选择要修改的那一份。",
+    sequence: 2, created_at: "2026-07-23T10:00:02Z", related_run_id: "chat-run",
+  });
+  state = ChatState.applyEvent(state, "chat-run", {
+    kind: "custom", sequence: 1,
+    payload: {
+      kind: "chat.clarification", field: "itinerary_id",
+      question: "我找到了多个可能的行程，请先选择要修改的那一份。",
+      options: ["南京三日游", "苏州两日游"],
+    },
+  });
+  const item = ChatState.activityItems(state).find(entry => entry.type === "message");
+  assert.deepEqual(item.clarification.options, ["南京三日游", "苏州两日游"]);
+});
+
+test("drops clarification options on reload but keeps the question text", () => {
+  // 刷新后 runs 来自 listRuns，不带 clarification：卡片退化成普通气泡，
+  // 但问题文本本身是持久化的助手消息，信息不会丢。
+  let state = ChatState.initialState();
+  state.runs["chat-run"] = { id: "chat-run", kind: "chat", status: "succeeded" };
+  state = ChatState.upsertMessage(state, {
+    id: "assistant-clarify", role: "assistant",
+    content: "我找到了多个可能的行程，请先选择要修改的那一份。",
+    sequence: 2, related_run_id: "chat-run",
+  });
+  const item = ChatState.activityItems(state).find(entry => entry.type === "message");
+  assert.equal(item.clarification, null);
+  assert.match(item.entity.content, /多个可能的行程/);
+});
+
+test("never attaches clarification options to a user message", () => {
+  let state = ChatState.initialState();
+  state.runs["chat-run"] = {
+    id: "chat-run", kind: "chat",
+    clarification: { kind: "chat.clarification", options: ["A"] },
+  };
+  state = ChatState.upsertMessage(state, {
+    id: "user-1", role: "user", content: "改一下", sequence: 1, related_run_id: "chat-run",
+  });
+  const item = ChatState.activityItems(state).find(entry => entry.type === "message");
+  assert.equal(item.clarification, null);
+});
+
+test("surfaces an amap quota warning as its own timeline item", () => {
+  let state = ChatState.initialState();
+  state = ChatState.applyEvent(state, "plan-1", {
+    kind: "custom", sequence: 1,
+    payload: {
+      kind: "amap.quota_warning", bucket: "search",
+      used: 3800, limit: 4750, remaining: 950,
+      message: "高德「基础搜索服务」的本月调用额度已用 3800/4750，接近上限。",
+    },
+  });
+  const items = ChatState.activityItems(state);
+  const warning = items.find(entry => entry.type === "quota_warning");
+  const card = items.find(entry => entry.type === "run");
+  assert.equal(warning.entityId, "plan-1");
+  assert.equal(warning.entity.quota_warning.used, 3800);
+  assert.match(warning.entity.quota_warning.message, /基础搜索服务/);
+  // 预警属于这条 Run 的旁路信息，必须排在任务卡之前
+  assert.ok(
+    items.indexOf(warning) < items.indexOf(card),
+    "配额预警应排在同一条 Run 的任务卡之前",
+  );
+});
+
+test("keeps only one quota warning per run and drops it when absent", () => {
+  let state = ChatState.initialState();
+  state = ChatState.applyEvent(state, "plan-1", {
+    kind: "custom", sequence: 1,
+    payload: { kind: "amap.quota_warning", bucket: "search", used: 3800, limit: 4750 },
+  });
+  state = ChatState.applyEvent(state, "plan-1", {
+    kind: "custom", sequence: 2,
+    payload: { kind: "amap.quota_warning", bucket: "weather", used: 4000, limit: 4750 },
+  });
+  const warnings = ChatState.activityItems(state).filter(e => e.type === "quota_warning");
+  assert.equal(warnings.length, 1, "预警不堆叠历史，只保留最后一条");
+  assert.equal(warnings[0].entity.quota_warning.bucket, "weather");
+
+  // 没有预警的 Run 不产生任何额外条目
+  let clean = ChatState.initialState();
+  clean.runs["plan-2"] = { id: "plan-2", kind: "travel_plan", status: "running" };
+  assert.equal(
+    ChatState.activityItems(clean).filter(e => e.type === "quota_warning").length,
+    0,
+  );
+});
+
