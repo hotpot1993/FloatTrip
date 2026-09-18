@@ -263,6 +263,9 @@ DOUBAO_API_KEY=your_doubao_endpoint    # 豆包 endpoint ID（用 doubao 时必�
 AMAP_JS_KEY=your_amap_js_key           # 高德 JS API Key（可选，前端地图）
 AMAP_JS_SECURITY_CODE=your_js_secret   # 高德 JS API 安全密钥（可选，与 JS Key 配套）
 REDIS_URL=redis://localhost:6379/0     # Redis 缓存（可选，不填则跳过缓存，不影响功能）
+JWT_SECRET=your_random_secret          # 登录 token 密钥（可选，不填则每次重启失效）
+ADMIN_USERNAME=admin                   # 管理员用户名（可选，默认 admin）
+ADMIN_PASSWORD=your_admin_password     # 管理员密码（可选，默认 admin123，仅首次创建时生效）
 RUNTIME_CHAT_CONCURRENCY=8             # Chat Run 并发上限（可选）
 RUNTIME_PLANNING_CONCURRENCY=2         # 正式规划 / 修改的全局并发上限（可选）
 RUNTIME_PLANNING_PER_USER=2            # 单用户正式规划 / 修改并发上限（可选）
@@ -305,14 +308,44 @@ python run.py
 
 打开浏览器访问 **[http://localhost:8765](http://localhost:8765)**，输入出行需求即可。
 
+### 6. 进入后台管理
+
+首次启动会自动创建管理员账号（默认 `admin` / `admin123`，可用 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 指定）。用管理员账号登录后，顶部导航会多出一项 **后台管理**（普通账号看不到，直接访问 `/admin` 也会被拒绝）。
+
+后台能做的事：
+
+| 能力 | 说明 |
+| --- | --- |
+| 账号列表与搜索 | 每个账号的行程 / 对话 / 记忆条数、注册与最近登录时间 |
+| 数据明细（只读） | 查看某个账号的行程、对话、长期记忆与任务记录 |
+| 禁用 / 启用 | 禁用后无法登录，**已签发的 token 立即失效** |
+| 重置密码 | 管理员直接设新密码，无需旧密码 |
+| 清空单个账号数据 | 删掉行程 / 对话 / 记忆 / 任务，账号保留 |
+| 删除账号 | 连带全部数据一起删除 |
+| 重置整个数据库 | 清空全部业务数据，**账号与表结构保留** |
+
+对应的接口都在 `/api/admin/*`，逐个校验 `role='admin'`：
+
+```bash
+GET    /api/admin/users?q=<关键字>        # 账号列表 + 全局概览
+GET    /api/admin/users/{id}              # 账号数据明细
+POST   /api/admin/users/{id}/status       # {"status": "active" | "disabled"}
+POST   /api/admin/users/{id}/password     # {"password": "至少6位"}
+POST   /api/admin/users/{id}/clear        # 清空该账号数据
+DELETE /api/admin/users/{id}              # 删除账号及其数据
+POST   /api/admin/reset                   # {"confirm": "RESET", "password": "<当前管理员密码>"}
+```
+
+> 重置整个数据库不可撤销。若仍有 `queued` / `running` / `waiting_user` 的任务，接口会返回 409 而不是硬清——先等任务结束或在对话里取消它。
+
 ---
 
 ## 📁 项目结构
 
 ```
 ├── app/
-│   ├── core/          # 环境变量加载、HTTP 工具、Redis 缓存层、SQLite、记忆、鉴权
-│   ├── api/           # HTTP/SSE 路由（含 conversations、runs 和运行指标）
+│   ├── core/          # 环境变量加载、HTTP 工具、Redis 缓存层、SQLite、记忆、鉴权、账号与管理员领域逻辑
+│   ├── api/           # HTTP/SSE 路由（含 conversations、runs、运行指标与管理后台）
 │   ├── chat/          # 对话 Agent、对话图与规划简报服务
 │   ├── llm/           # LLM 工厂：factory.py（按 LLM_PROVIDER 分发）+ deepseek.py / doubao.py
 │   ├── providers/
@@ -421,6 +454,11 @@ LLM 在用户未提供偏好时偶尔吐出 `null`/`none`/`无`/`不限` 等占�
 > 只读查看：`GET /api/runtime/amap-quota`。`bucket` 取值 `search` / `weather` / `lbs`。
 
 **前端 JS API Key 不在保护范围内**：`AMap.Map` / `AMap.Driving` 由浏览器直接消费，服务端数不到。当前前端没有使用任何 JS 侧 POI 搜索插件，因此不蚕食紧张的 5,000 搜索池；若将来引入，会静默蚕食。
+
+**17. 管理员后台与整库重置**
+启动时按环境变量自动创建管理员账号（`ADMIN_USERNAME` / `ADMIN_PASSWORD`，都不配则退回 `admin` / `admin123` 并在日志里提醒改密），后台入口只对 `role='admin'` 的账号显示。管理员可以查看每个账号的行程 / 对话 / 记忆条数，禁用或启用账号、重置他人密码、清空单个账号的数据、删除账号。**「禁用」是当场生效的**：每个请求都会校验账号在库里存在且状态为 `active`，而不是只信任 token——否则已签发的 token 会一直有效到进程重启，管理员会以为禁用没起作用。
+
+「重置整个数据库」清空全部业务数据（行程、对话、消息、长期记忆、任务与事件、高德用量计数、LangGraph 检查点），**账号与表结构保留**，所以重置完管理员无需重新初始化。破坏性操作有两道闸：要求原文确认短语 `RESET` 与当前管理员密码复核；若还有 `queued` / `running` / `waiting_user` 的任务则直接拒绝（409），避免把正在跑的规划脚下的数据抽走——同时管理员不能禁用或删除自己，防止把后台锁死。
 
 ---
 

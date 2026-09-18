@@ -17,10 +17,13 @@ function App() {
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const initialPathPage = window.location.pathname === "/profile"
     ? "profile"
-    : window.location.pathname === "/history" ? "history" : "chat";
+    : window.location.pathname === "/history" ? "history"
+    : window.location.pathname === "/admin" ? "admin" : "chat";
   const [page, setPage] = React.useState(initialPathPage);
   const [planKey, setPlanKey] = React.useState(0);
   const [authUser, setAuthUser] = React.useState(() => getAuth()?.username || null);
+  // 当前账号的角色与 id：后台入口是否显示、哪些操作要对自己禁用，都看它。
+  const [me, setMe] = React.useState(null);
   const [showAuthModal, setShowAuthModal] = React.useState(false);
   const [authReason, setAuthReason] = React.useState("");
   const [pendingAuthAction, setPendingAuthAction] = React.useState(null);
@@ -39,8 +42,12 @@ function App() {
     }));
     // 处理 URL 参数
     const params = new URLSearchParams(window.location.search);
-    if (["profile", "history"].includes(initialPathPage) && !getAuth()) {
-      setAuthReason(initialPathPage === "profile" ? "请先登录管理旅行画像" : "请先登录查看历史行程");
+    if (["profile", "history", "admin"].includes(initialPathPage) && !getAuth()) {
+      setAuthReason(
+        initialPathPage === "profile" ? "请先登录管理旅行画像"
+          : initialPathPage === "admin" ? "请先登录后再进入后台管理"
+          : "请先登录查看历史行程",
+      );
       setShowAuthModal(true);
     }
     if (params.get("login") === "1" && !getAuth()) {
@@ -74,10 +81,18 @@ function App() {
     checkAuth().then(result => {
       if (!result) setAuthUser(null);
     });
-    const onExpired = () => setAuthUser(null);
+    const onExpired = () => { setAuthUser(null); setMe(null); };
     window.addEventListener("auth:expired", onExpired);
     return () => window.removeEventListener("auth:expired", onExpired);
   }, []);
+
+  // 取当前账号的 role：后台入口只对管理员显示，普通账号看不到也进不去。
+  React.useEffect(() => {
+    if (!authUser) { setMe(null); return; }
+    let alive = true;
+    fetchMe().then(result => { if (alive) setMe(result); });
+    return () => { alive = false; };
+  }, [authUser]);
 
   React.useEffect(() => {
     document.documentElement.setAttribute("data-theme", t.theme || "morning");
@@ -141,6 +156,7 @@ function App() {
 
   const onAuthSuccess = (username) => {
     setAuthUser(username);
+    fetchMe().then(result => setMe(result));
     setShowAuthModal(false);
     setAuthReason("");
     const continuation = NavigationState.resolveAfterAuth(pendingAuthAction);
@@ -210,9 +226,12 @@ function App() {
             onClick={() => { if (!authUser) { requestLogin("请先登录管理旅行画像"); return; } go("profile"); }}>
             我的画像
           </button>
-          <button className={`topnav-link sweep-nav-link ${page === "sweep" ? "active" : ""}`} onClick={() => go("sweep")}>
-            🧪 测试
-          </button>
+          {me?.role === "admin" && (
+            <button className={`topnav-link ${page === "admin" ? "active" : ""}`}
+              onClick={() => go("admin")}>
+              后台管理
+            </button>
+          )}
         </nav>
 
         <div className="theme-switcher" role="group" aria-label="切换主题">
@@ -291,8 +310,20 @@ function App() {
       {page === "profile" && (
         <ProfilePage currentUsername={authUser} />
       )}
-      {page === "sweep" && (
-        <SweepPreviewPage />
+      {page === "admin" && (
+        me?.role === "admin"
+          ? <AdminPage meId={me.user_id} currentUsername={authUser} />
+          : (
+            <div className="admin-denied">
+              <h2>{!authUser ? "需要管理员权限" : me ? "需要管理员权限" : "正在校验权限…"}</h2>
+              {(!authUser || me) && (
+                <>
+                  <p>当前账号没有后台访问权限，请用管理员账号登录。</p>
+                  <button className="user-login-btn" onClick={openChat}>返回旅行对话</button>
+                </>
+              )}
+            </div>
+          )
       )}
 
       <TweaksPanel>

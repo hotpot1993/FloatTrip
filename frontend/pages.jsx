@@ -2580,161 +2580,399 @@ function ProfilePage({ currentUsername }) {
   );
 }
 
-/* ── Sweep 预览页 ─────────────────────────────────── */
-function SweepPreviewPage() {
-  const [files, setFiles]   = React.useState([]);
-  const [selFile, setSelFile] = React.useState(null);
-  const [selIdx, setSelIdx]   = React.useState(0);
-  const [trial, setTrial]     = React.useState(null);
-  const [loading, setLoading] = React.useState(false);
-  const [dayIdx, setDayIdx]   = React.useState(0);
+/* ── 后台管理页（仅管理员可见） ─────────────────── */
 
-  // 获取文件列表
-  React.useEffect(() => {
-    fetch("/api/sweep/list")
-      .then(r => r.json())
-      .then(data => {
-        setFiles(Array.isArray(data) ? data : []);
-        if (data.length > 0) setSelFile(data[0].file);
-      })
-      .catch(() => {});
+// 重置结果按表展示：只回一句「成功」会让人不知道到底删掉了什么。
+const ADMIN_TABLE_LABELS = {
+  run_events: "任务事件", runs: "规划任务", memory_extraction_jobs: "记忆提取任务",
+  conversation_memory_states: "对话记忆状态", messages: "对话消息",
+  planning_briefs: "需求清单", conversations: "对话", memory_facts: "长期记忆",
+  user_memory_states: "记忆版本", itineraries: "行程",
+  pending_modifications: "待确认修改", user_profiles: "旧版画像",
+  amap_quota_usage: "高德用量计数",
+};
+
+function adminTimeText(value) {
+  if (!value) return "—";
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleString();
+}
+
+function AdminDeletedList({ deleted }) {
+  const rows = Object.entries(deleted || {}).filter(([, n]) => n > 0);
+  if (!rows.length) return <div className="admin-hint">没有需要删除的数据</div>;
+  return (
+    <ul className="admin-deleted-list">
+      {rows.map(([table, n]) => (
+        <li key={table}><span>{ADMIN_TABLE_LABELS[table] || table}</span><b>{n}</b></li>
+      ))}
+    </ul>
+  );
+}
+
+function AdminPage({ meId, currentUsername }) {
+  const [data, setData] = React.useState(null);
+  const [keyword, setKeyword] = React.useState("");
+  const [loading, setLoading] = React.useState(true);
+  const [busy, setBusy] = React.useState(false);
+  const [error, setError] = React.useState("");
+  const [notice, setNotice] = React.useState("");
+  const [confirm, setConfirm] = React.useState(null);      // { kind, user }
+  const [passwordDraft, setPasswordDraft] = React.useState("");
+  const [detailUser, setDetailUser] = React.useState(null);
+  const [detail, setDetail] = React.useState(null);
+  const [detailLoading, setDetailLoading] = React.useState(false);
+  const [resetOpen, setResetOpen] = React.useState(false);
+  const [resetPhrase, setResetPhrase] = React.useState("");
+  const [resetPassword, setResetPassword] = React.useState("");
+  const [resetResult, setResetResult] = React.useState(null);
+
+  const load = React.useCallback(async (q) => {
+    setLoading(true);
+    try {
+      setData(await adminListUsers(q || ""));
+      setError("");
+    } catch (e) {
+      setError(e.message || "加载失败");
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  // 获取 trial 数据
-  React.useEffect(() => {
-    if (!selFile) return;
-    setLoading(true);
-    setDayIdx(0);
-    setTrial(null);
-    fetch(`/api/sweep/trial?file=${encodeURIComponent(selFile)}&idx=${selIdx}`)
-      .then(r => r.json())
-      .then(data => { setTrial(data); setLoading(false); })
-      .catch(() => setLoading(false));
-  }, [selFile, selIdx]);
+  React.useEffect(() => { load(""); }, [load]);
 
-  const fileTrials = files.find(f => f.file === selFile)?.trials || [];
-  const adapted    = trial?.final_plan ? adaptPlan(trial.final_plan, null) : null;
-  const day        = adapted?.days?.[dayIdx];
+  const run = async (task, okText) => {
+    setBusy(true);
+    setError("");
+    try {
+      await task();
+      setNotice(okText);
+      setConfirm(null);
+      setPasswordDraft("");
+      await load(keyword);
+    } catch (e) {
+      setError(e.message || "操作失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openDetail = async (user) => {
+    setDetailUser(user);
+    setDetail(null);
+    setDetailLoading(true);
+    try {
+      setDetail(await adminUserDetail(user.id));
+    } catch (e) {
+      setError(e.message || "加载明细失败");
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
+  const closeDetail = () => { setDetailUser(null); setDetail(null); };
+
+  const submitReset = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = await adminResetDatabase(resetPassword);
+      setResetResult(result);
+      setResetOpen(false);
+      setResetPhrase("");
+      setResetPassword("");
+      setNotice("数据库已重置：业务数据已清空，账号全部保留");
+      await load(keyword);
+    } catch (e) {
+      setError(e.message || "重置失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirmSpec = {
+    disable:  { title: "禁用账号",     label: "禁用",     danger: true,
+                text: u => `禁用后 ${u.username} 无法登录，已签发的登录状态立即失效。` },
+    enable:   { title: "启用账号",     label: "启用",     danger: false,
+                text: u => `启用后 ${u.username} 可以重新登录。` },
+    password: { title: "重置密码",     label: "设为新密码", danger: false,
+                text: u => `为 ${u.username} 设置新密码，旧密码立即失效。` },
+    clear:    { title: "清空该账号的数据", label: "清空数据", danger: true,
+                text: u => `将删除 ${u.username} 的全部行程、对话、长期记忆与任务记录，账号本身保留。此操作不可撤销。` },
+    delete:   { title: "删除账号",     label: "永久删除", danger: true,
+                text: u => `将永久删除 ${u.username} 及其全部数据。此操作不可撤销。` },
+  }[confirm?.kind];
+
+  const runConfirm = () => {
+    const user = confirm.user;
+    if (confirm.kind === "password") {
+      if (passwordDraft.length < 6) { setError("新密码至少 6 位"); return; }
+      return run(() => adminResetUserPassword(user.id, passwordDraft), `已重置 ${user.username} 的密码`);
+    }
+    if (confirm.kind === "disable") return run(() => adminSetUserStatus(user.id, "disabled"), `已禁用 ${user.username}`);
+    if (confirm.kind === "enable") return run(() => adminSetUserStatus(user.id, "active"), `已启用 ${user.username}`);
+    if (confirm.kind === "clear") return run(() => adminClearUserData(user.id), `已清空 ${user.username} 的数据`);
+    if (confirm.kind === "delete") return run(() => adminDeleteUser(user.id), `已删除账号 ${user.username}`);
+  };
+
+  const canReset = resetPhrase.trim().toUpperCase() === "RESET" && resetPassword.length > 0;
 
   return (
-    <div className="sweep-preview-page">
-      {/* 顶部导航：文件 + trial 下拉 */}
-      <div className="sweep-nav">
-        <span className="sweep-nav-title">🧪 测试预览</span>
-        <select
-          value={selFile || ""}
-          onChange={e => { setSelFile(e.target.value); setSelIdx(0); }}
-          disabled={files.length === 0}
-        >
-          {files.length === 0 && <option>暂无 sweep 结果</option>}
-          {files.map(f => (
-            <option key={f.file} value={f.file}>
-              {f.file}（{f.trials.length} 条）
-            </option>
-          ))}
-        </select>
-        <select
-          value={selIdx}
-          onChange={e => setSelIdx(Number(e.target.value))}
-          disabled={fileTrials.length === 0}
-        >
-          {fileTrials.map(t => (
-            <option key={t.idx} value={t.idx}>
-              {t.crash ? "💥" : t.pass ? "✅" : "❌"} {t.dest} / {t.pref} / trial {t.idx + 1}
-            </option>
-          ))}
-        </select>
-        {trial && !trial.crash && (
-          <span className="sweep-nav-meta">
-            rev={trial.review_rounds}轮 · tc={trial.time_check_rounds}轮 · {trial.elapsed_s}s
-          </span>
-        )}
+    <div className="page page-fade admin-page">
+      <div className="mag-head">
+        <div>
+          <div className="eyebrow">ADMIN · 后台管理</div>
+          <h1>后台管理</h1>
+        </div>
+        <div className="head-note">
+          当前管理员：{currentUsername || "—"}<br />
+          这里能改动他人的账号与数据，也能清空整个数据库
+        </div>
       </div>
 
-      {loading && <div className="sweep-loading">加载中…</div>}
+      <div className="admin-toolbar">
+        <span className="admin-toolbar-note">
+          后台接口每次都会校验管理员角色，普通账号看不到入口也调不通接口。
+        </span>
+        <button className="admin-refresh" onClick={() => load(keyword)} disabled={loading || busy}>
+          {loading ? "加载中…" : "刷新"}
+        </button>
+      </div>
 
-      {!loading && trial?.crash && (
-        <div className="sweep-crash">
-          💥 该 trial 崩溃：{trial.crash_reason} — {trial.crash_detail || ""}
+      {error && (
+        <div className="admin-alert error" role="alert">
+          <span>{error}</span>
+          <button onClick={() => setError("")}>关闭</button>
+        </div>
+      )}
+      {notice && (
+        <div className="admin-alert ok" role="status">
+          <span>{notice}</span>
+          <button onClick={() => setNotice("")}>关闭</button>
         </div>
       )}
 
-      {!loading && trial && !trial.crash && !adapted && (
-        <div className="sweep-empty">
-          <div className="es-title">该 trial 无 final_plan 数据</div>
-          <div>这是旧版 sweep 结果，请重新运行 sweep 生成新文件</div>
-        </div>
-      )}
-
-      {!loading && trial && !trial.crash && adapted && (
-        <div className="sweep-body">
-          {/* 左：行程 */}
-          <div className="sweep-plan">
-            {adapted.weather?.length > 0 && (
-              <div className="weather-strip">
-                {adapted.weather.map((w, i) => (
-                  <div key={i} className="weather-cell">
-                    <span className="w-ico">{w.icon}</span>
-                    <span>
-                      <div className="w-day">{w.day}</div>
-                      <div className="w-temp">
-                        <span className="w-weather">{w.text}</span>
-                        <span className="w-hi">{w.hi}°</span>
-                        <span className="w-sep">/</span>
-                        <span className="w-lo">{w.lo}°</span>
-                      </div>
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div className="day-tabs">
-              {adapted.days.map((d, i) => (
-                <button key={i} className={`day-tab ${i === dayIdx ? "active" : ""}`} onClick={() => setDayIdx(i)}>
-                  <span className="dt-num">Day {i + 1}</span>
-                  <span className="dt-date">{d.date}</span>
-                </button>
-              ))}
+      {data && (
+        <section className="admin-stats">
+          {[
+            ["账号", data.summary.user_count],
+            ["行程", data.summary.itinerary_count],
+            ["对话", data.summary.conversation_count],
+            ["长期记忆", data.summary.memory_fact_count],
+            ["进行中任务", data.summary.active_run_count],
+            ["已禁用账号", data.summary.disabled_count],
+          ].map(([label, value]) => (
+            <div className="admin-stat" key={label}>
+              <div className="admin-stat-value">{value}</div>
+              <div className="admin-stat-label">{label}</div>
             </div>
+          ))}
+        </section>
+      )}
 
-            {day && <div className="day-header"><div className="day-theme">{day.theme}</div></div>}
-            {day && <Timeline items={day.items} key={dayIdx} />}
-
-            {adapted.tips?.length > 0 && (
-              <div className="tip-card" style={{ marginTop: 20 }}>
-                <div className="tip-body">
-                  <div className="tip-title">途途的小贴士</div>
-                  <ul className="tip-list">
-                    {adapted.tips.map((t, i) => <li key={i}>{t}</li>)}
-                  </ul>
-                </div>
-              </div>
+      <section className="admin-panel">
+        <div className="admin-panel-head">
+          <h2>账号列表</h2>
+          <form className="admin-search"
+            onSubmit={e => { e.preventDefault(); load(keyword); }}>
+            <input value={keyword} placeholder="按用户名搜索"
+              onChange={e => setKeyword(e.target.value)} />
+            <button type="submit" disabled={loading}>搜索</button>
+            {keyword && (
+              <button type="button" className="admin-search-clear"
+                onClick={() => { setKeyword(""); load(""); }}>清除</button>
             )}
-          </div>
+          </form>
+        </div>
 
-          {/* 中：地图 */}
-          <div className="map-col">
-            {day && <MapPanel day={day} dayIdx={dayIdx} />}
-          </div>
+        <div className="admin-table-wrap">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>用户名</th><th>角色</th><th>状态</th><th>行程</th><th>对话</th>
+                <th>记忆</th><th>最近登录</th><th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(data?.users || []).map(user => {
+                const isSelf = user.id === meId;
+                const disabled = user.status !== "active";
+                return (
+                  <tr key={user.id} className={disabled ? "is-disabled" : ""}>
+                    <td className="admin-user">
+                      <span className="admin-user-name">{user.username}</span>
+                      {isSelf && <span className="admin-tag">当前账号</span>}
+                    </td>
+                    <td>{user.role === "admin"
+                      ? <span className="admin-tag admin">管理员</span>
+                      : "普通用户"}</td>
+                    <td>{disabled ? <span className="admin-tag off">已禁用</span> : "正常"}</td>
+                    <td>{user.itinerary_count}</td>
+                    <td>{user.conversation_count}</td>
+                    <td>{user.memory_fact_count}</td>
+                    <td className="admin-time">{adminTimeText(user.last_login_at)}</td>
+                    <td className="admin-actions">
+                      <button onClick={() => openDetail(user)}>明细</button>
+                      <button onClick={() => { setPasswordDraft(""); setConfirm({ kind: "password", user }); }}>
+                        重置密码
+                      </button>
+                      {disabled
+                        ? <button onClick={() => setConfirm({ kind: "enable", user })}>启用</button>
+                        : <button disabled={isSelf}
+                            title={isSelf ? "不能禁用当前登录的管理员账号" : ""}
+                            onClick={() => setConfirm({ kind: "disable", user })}>禁用</button>}
+                      <button onClick={() => setConfirm({ kind: "clear", user })}>清空数据</button>
+                      <button className="danger" disabled={isSelf}
+                        title={isSelf ? "不能删除当前登录的管理员账号" : ""}
+                        onClick={() => setConfirm({ kind: "delete", user })}>删除</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {loading && <div className="admin-hint">加载中…</div>}
+        {!loading && data && data.users.length === 0 && (
+          <div className="admin-hint">{keyword ? "没有匹配的账号" : "还没有其他账号"}</div>
+        )}
+      </section>
 
-          {/* 右：评测面板 */}
-          <SweepEvalPanel
-            code={trial.code}
-            reviewRounds={trial.review_rounds}
-            timeCheckRounds={trial.time_check_rounds}
-            profileUpdate={trial.profile_update}
-            dialogue={trial.transcript?.dialogue}
-            overallPass={trial.overall_pass}
-            elapsedS={trial.elapsed_s}
-          />
+      <section className="admin-panel admin-danger-zone">
+        <div className="admin-panel-head"><h2>重置整个数据库</h2></div>
+        <p className="admin-danger-text">
+          清空所有行程、对话、消息、长期记忆与任务记录，账号（含普通用户与管理员）和表结构全部保留。
+          此操作不可撤销，执行前请确认没有正在进行的规划任务。
+        </p>
+        <button className="admin-danger-btn"
+          onClick={() => { setResetOpen(true); setResetPhrase(""); setResetPassword(""); setError(""); }}>
+          重置数据库…
+        </button>
+      </section>
+
+      {resetResult && (
+        <section className="admin-panel">
+          <div className="admin-panel-head">
+            <h2>上次重置结果</h2>
+            <button className="admin-collapse" onClick={() => setResetResult(null)}>收起</button>
+          </div>
+          <AdminDeletedList deleted={resetResult.deleted} />
+          <div className="admin-hint">
+            保留账号 {resetResult.remaining_user_count} 个 · 规划检查点：
+            {resetResult.checkpoints?.status === "cleared" ? "已清空"
+              : resetResult.checkpoints?.status === "failed" ? `清空失败（${resetResult.checkpoints.detail}）`
+              : "无需清理"}
+          </div>
+        </section>
+      )}
+
+      {confirm && confirmSpec && (
+        <ConfirmModal
+          title={confirmSpec.title}
+          message={confirmSpec.text(confirm.user)}
+          confirmLabel={confirmSpec.label}
+          danger={confirmSpec.danger}
+          busy={busy}
+          onCancel={() => { setConfirm(null); setPasswordDraft(""); }}
+          onConfirm={runConfirm}
+        >
+          {confirm.kind === "password" && (
+            <label className="admin-field">
+              <span>新密码（至少 6 位）</span>
+              <input type="password" value={passwordDraft} autoFocus
+                onChange={e => setPasswordDraft(e.target.value)} />
+            </label>
+          )}
+        </ConfirmModal>
+      )}
+
+      {resetOpen && (
+        <div className="modal-backdrop" onClick={() => { if (!busy) setResetOpen(false); }}>
+          <div className="modal-card" role="dialog" aria-modal="true"
+            aria-labelledby="admin-reset-title" onClick={e => e.stopPropagation()}>
+            <div className="modal-title" id="admin-reset-title">重置整个数据库</div>
+            <div className="modal-sub">
+              业务数据会被清空，账号全部保留。这条路径不可撤销，因此需要确认短语与管理员密码两项确认。
+            </div>
+            <label className="admin-field">
+              <span>确认短语：请输入 <code>RESET</code></span>
+              <input value={resetPhrase} placeholder="RESET" autoFocus
+                onChange={e => setResetPhrase(e.target.value)} />
+            </label>
+            <label className="admin-field">
+              <span>当前管理员密码</span>
+              <input type="password" value={resetPassword}
+                onChange={e => setResetPassword(e.target.value)} />
+            </label>
+            <div className="confirm-actions">
+              <button className="confirm-cancel" disabled={busy}
+                onClick={() => setResetOpen(false)}>取消</button>
+              <button className="confirm-danger" disabled={busy || !canReset} onClick={submitReset}>
+                {busy ? "重置中…" : "确认重置"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
-      {!loading && files.length === 0 && (
-        <div className="sweep-empty">
-          <div className="es-title">暂无 sweep 结果</div>
-          <div>先运行 <code>python -m tests.eval.sweep --dest 北京 --pref history --k 1 --no-judge</code></div>
+      {detailUser && (
+        <div className="modal-backdrop" onClick={closeDetail}>
+          <div className="modal-card admin-detail" role="dialog" aria-modal="true"
+            aria-labelledby="admin-detail-title" onClick={e => e.stopPropagation()}>
+            <div className="modal-title" id="admin-detail-title">{detailUser.username} · 数据明细</div>
+            {detailLoading && <div className="admin-hint">加载中…</div>}
+            {detail && (
+              <>
+                <div className="admin-detail-meta">
+                  <span>角色：{detail.user.role === "admin" ? "管理员" : "普通用户"}</span>
+                  <span>状态：{detail.user.status === "active" ? "正常" : "已禁用"}</span>
+                  <span>注册：{adminTimeText(detail.user.created_at)}</span>
+                  <span>最近登录：{adminTimeText(detail.user.last_login_at)}</span>
+                </div>
+                <div className="admin-detail-cols">
+                  <div>
+                    <h3>行程 <small>{detail.itineraries.length}</small></h3>
+                    {detail.itineraries.length
+                      ? <ul>{detail.itineraries.map(t => (
+                          <li key={t.id}>{t.destination || "未命名"} · {t.start_date || "—"} 起 · v{t.version}</li>
+                        ))}</ul>
+                      : <div className="admin-hint">暂无</div>}
+                  </div>
+                  <div>
+                    <h3>对话 <small>{detail.conversations.length}</small></h3>
+                    {detail.conversations.length
+                      ? <ul>{detail.conversations.map(c => (
+                          <li key={c.id}>{c.title || "未命名对话"}
+                            {c.status === "archived" && <small> · 已归档</small>}</li>
+                        ))}</ul>
+                      : <div className="admin-hint">暂无</div>}
+                  </div>
+                  <div>
+                    <h3>长期记忆 <small>{detail.memory_facts.length}</small></h3>
+                    {detail.memory_facts.length
+                      ? <ul>{detail.memory_facts.map(f => (
+                          <li key={f.id}>
+                            {MEMORY_CATEGORY_LABELS[f.category] || f.category} ·
+                            {MEMORY_POLARITY_LABELS[f.polarity] || f.polarity} {f.value_text}
+                          </li>
+                        ))}</ul>
+                      : <div className="admin-hint">暂无</div>}
+                  </div>
+                  <div>
+                    <h3>任务记录 <small>{detail.runs.length}</small></h3>
+                    {detail.runs.length
+                      ? <ul>{detail.runs.map(r => (
+                          <li key={r.id}>{r.kind} · {r.status} · {adminTimeText(r.created_at)}</li>
+                        ))}</ul>
+                      : <div className="admin-hint">暂无</div>}
+                  </div>
+                </div>
+              </>
+            )}
+            <div className="confirm-actions">
+              <button className="confirm-cancel" onClick={closeDetail}>关闭</button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -2917,4 +3155,4 @@ function HomePage({ onStart }) {
   );
 }
 
-Object.assign(window, { PlanPage, TripDetailPage, HistoryPage, ProfilePage, AuthModal, SweepPreviewPage });
+Object.assign(window, { PlanPage, TripDetailPage, HistoryPage, ProfilePage, AdminPage, AuthModal });

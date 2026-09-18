@@ -36,6 +36,11 @@ class ThreadStore:
         with self._lock:
             self._store.pop(thread_id, None)
 
+    def clear(self) -> None:
+        """清空全部条目。管理员重置数据库后，这些待补信息指向的行程已不存在。"""
+        with self._lock:
+            self._store.clear()
+
     def _evict(self) -> None:
         now = time.monotonic()
         with self._lock:

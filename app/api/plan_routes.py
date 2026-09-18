@@ -9,7 +9,7 @@ from itertools import permutations
 from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from app.core.auth import decode_token
+from app.api.deps import optional_user_id, require_user
 from app.core.amap_quota import QuotaBucket
 from app.core.cache import (
     MANUAL_SEARCH_TTL,
@@ -175,11 +175,7 @@ class OptimizeDayRequest(BaseModel):
 @router.post("/api/plan/optimize_day")
 def optimize_day(req: OptimizeDayRequest, authorization: str | None = Header(default=None)):
     """对行程中某一天的景点顺序做暴力枚举最优化（最短路程），evening 景点固定末位。"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="需要登录")
-    user_id = decode_token(authorization[7:])
-    if not user_id:
-        raise HTTPException(status_code=401, detail="token 无效或已过期")
+    user_id = require_user(authorization)
 
     with get_conn() as conn:
         # 校验所有权
@@ -228,11 +224,7 @@ class RevertDayRequest(BaseModel):
 @router.post("/api/plan/revert_day")
 def revert_day(req: RevertDayRequest, authorization: str | None = Header(default=None)):
     """将某天路线回退到优化前的顺序（前端传入原始 timeline）。"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="需要登录")
-    user_id = decode_token(authorization[7:])
-    if not user_id:
-        raise HTTPException(status_code=401, detail="token 无效或已过期")
+    user_id = require_user(authorization)
 
     with get_conn() as conn:
         row = conn.execute(
@@ -260,10 +252,7 @@ def revert_day(req: RevertDayRequest, authorization: str | None = Header(default
 
 
 def _get_user_id(request: Request) -> str | None:
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        return None
-    return decode_token(auth[7:])
+    return optional_user_id(request)
 
 
 class ConfirmModificationRequest(BaseModel):
@@ -358,10 +347,7 @@ async def poi_search(
     改成 async 是为了走 `app.providers.amap.channel`——那是唯一会预占额度并
     受并发约束的出口。同步路由原本完全绕过并发信号量。
     """
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="需要登录")
-    if not decode_token(authorization[7:]):
-        raise HTTPException(status_code=401, detail="token 无效或已过期")
+    require_user(authorization)
     if kind not in ("attraction", "restaurant"):
         raise HTTPException(status_code=400, detail="kind 须为 attraction 或 restaurant")
 
@@ -444,11 +430,7 @@ def save_timeline(
     authorization: str | None = Header(default=None),
 ):
     """保存手动编辑后的逐天 timeline。只合并 timeline，不允许前端覆盖 plan 其他字段。"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="需要登录")
-    user_id = decode_token(authorization[7:])
-    if not user_id:
-        raise HTTPException(status_code=401, detail="token 无效或已过期")
+    user_id = require_user(authorization)
 
     with get_conn() as conn:
         row = conn.execute(
@@ -494,10 +476,7 @@ async def poi_nearby(
     authorization: str | None = Header(default=None),
 ):
     """周边 POI 搜索，按距离排序。type=风景名胜|餐饮服务，radius 最大 5000m。"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="需要登录")
-    if not decode_token(authorization[7:]):
-        raise HTTPException(status_code=401, detail="token 无效或已过期")
+    require_user(authorization)
 
     type = type.strip()
     if type not in ("风景名胜", "餐饮服务"):
@@ -549,11 +528,7 @@ def save_plan_metadata(
     authorization: str | None = Header(default=None),
 ):
     """保存 hotel / notes / day_themes（每天主题）到 final_plan JSON，不影响 timeline。"""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="需要登录")
-    user_id = decode_token(authorization[7:])
-    if not user_id:
-        raise HTTPException(status_code=401, detail="token 无效或已过期")
+    user_id = require_user(authorization)
 
     with get_conn() as conn:
         row = conn.execute(
@@ -607,10 +582,7 @@ async def route_walking(
     消耗者是前端的 AMap.Driving，服务端数不到），并按坐标对缓存——用户反复点
     「导航」看同一段路，不该每次都真的请求一次。
     """
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="需要登录")
-    if not decode_token(authorization[7:]):
-        raise HTTPException(status_code=401, detail="token 无效或已过期")
+    require_user(authorization)
 
     key = amap_key()
     if not key:

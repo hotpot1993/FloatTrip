@@ -3,7 +3,8 @@
 路由：
   POST /api/plan/stream — SSE 流式规划（含多轮续接、修改规划、记忆注入）
   POST /api/plan        — 同步规划（向后兼容）
-  POST /api/auth/*      — 注册 / 登录
+  POST /api/auth/*      — 注册 / 登录 / 当前账号
+  GET  /api/admin/*     — 管理员后台：账号管理、数据清理、整库重置
   GET  /api/history     — 历史行程列表
   GET  /api/history/:id — 历史行程详情
   GET  /api/health      — 健康检查
@@ -20,13 +21,14 @@ from typing import Optional
 
 import asyncio
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app.core.auth import decode_token
+from app.api.deps import require_user_from_request
+from app.core import users as users_repo
 from app.core.database import get_conn, init_db
 from app.core.amap_quota import validate_quota_config
 from app.core.env import load_local_env
@@ -40,10 +42,10 @@ from app.core.thread_store import thread_store
 from app.planning.graph import run_modification_stream
 from app.planning.graph import run_stream as run_plan_stream
 from app.api.auth_routes import router as auth_router
+from app.api.admin_routes import router as admin_router
 from app.api.history_routes import router as history_router
 from app.api.profile_routes import router as profile_router
 from app.api.plan_routes import router as plan_router
-from app.api.sweep_routes import router as sweep_router
 from app.api.runtime_routes import router as runtime_router
 from app.runtime.container import start_runtime, stop_runtime, chat_service
 from app.runtime.container import manager as runtime_manager
@@ -55,6 +57,9 @@ from app.runtime.compat import (
 
 load_local_env()
 init_db()
+# 管理员账号必须是启动时的确定性结果：后台入口依赖 role=admin，
+# 靠人工跑脚本创建会让「部署完进不去后台」变成偶发问题。
+users_repo.ensure_admin_account()
 # 配额配置非法必须让启动失败。传 0 的意图是「不限制」，一个拼错的负数或非数字
 # 绝不能退化成同样的效果——那会让保护静默消失，而用户以为它在。
 validate_quota_config()
@@ -64,10 +69,10 @@ validate_quota_config()
 app = FastAPI(title="AI 旅游规划助手", version="0.1.0")
 
 app.include_router(auth_router)
+app.include_router(admin_router)
 app.include_router(history_router)
 app.include_router(profile_router)
 app.include_router(plan_router)
-app.include_router(sweep_router)
 app.include_router(runtime_router)
 
 
@@ -92,13 +97,11 @@ app.add_middleware(
 # ─── 辅助：从 Authorization header 提取 user_id（强制登录）────
 
 def _get_required_user_id(request: Request) -> str:
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="请先登录后再使用规划功能")
-    user_id = decode_token(auth[7:])
-    if not user_id:
-        raise HTTPException(status_code=401, detail="登录已过期，请重新登录")
-    return user_id
+    return require_user_from_request(
+        request,
+        missing="请先登录后再使用规划功能",
+        invalid="登录已过期，请重新登录",
+    )
 
 
 # ─── API 路由 ─────────────────────────────────────────────────
@@ -363,6 +366,12 @@ def history_page():
 
 @app.get("/profile")
 def profile_page():
+    return _frontend_index_response()
+
+
+@app.get("/admin")
+def admin_page():
+    """后台管理的 SPA 入口。权限判断在接口层与前端路由里，这里只负责发壳。"""
     return _frontend_index_response()
 
 

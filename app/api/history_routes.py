@@ -4,20 +4,15 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Header, HTTPException
 
+from app.api.deps import require_user
 from app.core import memory
-from app.core.auth import decode_token
 from app.core.database import get_conn
 
 router = APIRouter(prefix="/api/history", tags=["history"])
 
 
 def _require_user(authorization: str | None) -> str:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "未登录")
-    user_id = decode_token(authorization[7:])
-    if not user_id:
-        raise HTTPException(401, "token 无效或已过期")
-    return user_id
+    return require_user(authorization, missing="未登录", invalid="token 无效或已过期")
 
 
 @router.get("")

@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Literal
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from app.core.auth import decode_token
+from app.api.deps import require_user
 from app.core.database import get_conn
 from app.core.travel_memory import MemoryNotFound, MemoryRepository
 
@@ -43,12 +43,7 @@ class MemoryPatch(BaseModel):
 
 
 def _require_user(authorization: str | None) -> str:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "未登录")
-    user_id = decode_token(authorization[7:])
-    if not user_id:
-        raise HTTPException(401, "token 无效或已过期")
-    return user_id
+    return require_user(authorization, missing="未登录", invalid="token 无效或已过期")
 
 
 @router.get("/profile")

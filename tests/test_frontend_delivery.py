@@ -24,3 +24,16 @@ def test_frontend_scripts_are_revalidated():
     assert response.headers["cache-control"] == "no-cache, must-revalidate"
     assert "function PlanningBriefCard" in response.text
     assert "memory.applied_facts" in response.text
+
+
+def test_spa_entry_paths_are_served_and_never_cached():
+    """/admin 等前端路由必须由后端发壳，否则直接刷新该地址会 404。
+
+    这里只断言"发的是同一份壳"，权限判断属于接口层（见 test_admin_api.py）。
+    """
+    client = TestClient(app)
+    for path in ("/", "/history", "/profile", "/admin"):
+        response = client.get(path)
+        assert response.status_code == 200, path
+        assert response.headers["cache-control"] == "no-store, max-age=0", path
+        assert '<div id="root"></div>' in response.text, path

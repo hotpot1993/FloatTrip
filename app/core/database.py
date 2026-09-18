@@ -33,6 +33,9 @@ def init_db(path: str | Path | None = None) -> None:
                 id            TEXT PRIMARY KEY,
                 username      TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
+                role          TEXT NOT NULL DEFAULT 'user',
+                status        TEXT NOT NULL DEFAULT 'active',
+                last_login_at TEXT,
                 created_at    TEXT NOT NULL
             );
 
@@ -249,6 +252,9 @@ def init_db(path: str | Path | None = None) -> None:
         except sqlite3.OperationalError:
             pass  # 列已存在
         for statement in (
+            "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
+            "ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE users ADD COLUMN last_login_at TEXT",
             "ALTER TABLE itineraries ADD COLUMN root_id TEXT",
             "ALTER TABLE itineraries ADD COLUMN version INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE conversations ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",

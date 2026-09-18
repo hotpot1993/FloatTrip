@@ -11,7 +11,7 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.core.auth import decode_token
+from app.api.deps import require_user
 from app.core.amap_quota import QuotaBucket, current_month
 from app.core.amap_quota_store import QuotaStore
 from app.core.database import get_conn, get_db_path
@@ -114,12 +114,7 @@ async def reconcile_amap_quota(
 
 
 def _owner(authorization: str | None) -> str:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="需要登录")
-    user_id = decode_token(authorization[7:])
-    if not user_id:
-        raise HTTPException(status_code=401, detail="token 无效或已过期")
-    return user_id
+    return require_user(authorization)
 
 
 def _not_found(exc: Exception) -> HTTPException:

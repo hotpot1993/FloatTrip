@@ -549,74 +549,8 @@ function NearbySearchModal({ location, name, onClose, onPickMeal }) {
   );
 }
 
-/* ── Sweep 评测侧栏 ───────────────────────────────── */
-const GRADERS = [
-  { key: "g1_closed_pool",           label: "G1 无幻觉" },
-  { key: "g2_time_check",            label: "G2 时间核查" },
-  { key: "g3_proximity",             label: "G3 地理跨度" },
-  { key: "g4_structure",             label: "G4 结构合法" },
-  { key: "g5_coverage",              label: "G5 覆盖完整" },
-  { key: "g6_weather",               label: "G6 天气合规" },
-  { key: "g7_convergence",           label: "G7 收敛" },
-  { key: "g8_time_check_efficiency", label: "G8 TC效率" },
-];
-
-function SweepEvalPanel({ code, reviewRounds, timeCheckRounds, profileUpdate, dialogue, overallPass, elapsedS }) {
-  const results = code?.results || {};
-  return (
-    <div className="sweep-eval-panel">
-      <div className={`sweep-verdict ${overallPass ? "pass" : "fail"}`}>
-        {overallPass ? "✅ 通过" : "❌ 未通过"}
-        {elapsedS != null && <span className="sweep-elapsed">{elapsedS}s</span>}
-      </div>
-
-      <div className="sweep-section-title">代码打分</div>
-      {GRADERS.map(({ key, label }) => {
-        const r = results[key];
-        if (!r) return null;
-        const isNA = !r.passed && r.detail?.includes("跳过");
-        return (
-          <React.Fragment key={key}>
-            <div className={`sweep-g-row ${isNA ? "na" : r.passed ? "pass" : "fail"}`}>
-              <span>{isNA ? "—" : r.passed ? "✅" : "❌"}</span>
-              <span>{label}</span>
-            </div>
-            {!r.passed && !isNA && <div className="sweep-g-detail">{r.detail}</div>}
-          </React.Fragment>
-        );
-      })}
-
-      <div className="sweep-section-title">流程</div>
-      <div className="sweep-stat">评审：{reviewRounds} 轮</div>
-      <div className="sweep-stat">time_check：{timeCheckRounds} 轮</div>
-
-      {profileUpdate && !profileUpdate.error && (
-        <>
-          <div className="sweep-section-title">画像更新</div>
-          {(profileUpdate.diff || []).length > 0
-            ? profileUpdate.diff.map((d, i) => <div key={i} className="sweep-profile-row">{d}</div>)
-            : <div className="sweep-profile-row sweep-na">无变更</div>}
-          {(profileUpdate.change_log || []).length > 0 && (
-            <details className="sweep-details">
-              <summary>变更理由</summary>
-              {profileUpdate.change_log.map((c, i) => <p key={i}>{c}</p>)}
-            </details>
-          )}
-        </>
-      )}
-
-      {(dialogue || []).length > 0 && (
-        <details className="sweep-details">
-          <summary>📜 规划对话</summary>
-          {dialogue.map((d, i) => <p key={i}>{d}</p>)}
-        </details>
-      )}
-    </div>
-  );
-}
-
 Object.assign(window, {
   JourneyLoading, DayMap, MapPanel, Timeline, NavRow, Thumb,
   RecommendStrip, NearbySearchModal,
-  SweepEvalPanel, walkNote, WalkIcon,
+  walkNote, WalkIcon,
 });

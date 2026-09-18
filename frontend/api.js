@@ -74,6 +74,20 @@ async function checkAuth() {
   } catch { return null; }
 }
 
+/** 当前登录账号（含 role）。后台入口是否显示由它决定，前端不自己猜。 */
+async function fetchMe() {
+  const a = getAuth();
+  if (!a) return null;
+  try {
+    const r = await fetch("/api/auth/me", { headers: authHeaders() });
+    if (!r.ok) {
+      if (r.status === 401) clearAuth();
+      return null;
+    }
+    return await r.json();
+  } catch { return null; }
+}
+
 /* ── Planning SSE ─────────────────────────────────── */
 async function streamPlan(body, callbacks, url = "/api/plan/stream") {
   const { onStage, onResult, onMissingFields, onWarning, onError, onAbort } = callbacks;
@@ -822,9 +836,44 @@ function adaptPlan(backendPlan, username) {
   };
 }
 
+/* ── 管理员后台 ───────────────────────────────────── */
+/* 全部走 /api/admin/*，服务端逐个校验 role=admin；
+   前端只负责隐藏入口，真正的权限判断不在浏览器里。 */
+function adminListUsers(q = "") {
+  const query = q ? `?q=${encodeURIComponent(q)}` : "";
+  return apiJson(`/api/admin/users${query}`);
+}
+function adminUserDetail(userId) {
+  return apiJson(`/api/admin/users/${encodeURIComponent(userId)}`);
+}
+function adminSetUserStatus(userId, status) {
+  return apiJson(`/api/admin/users/${encodeURIComponent(userId)}/status`, {
+    method: "POST", body: JSON.stringify({ status }),
+  });
+}
+function adminResetUserPassword(userId, password) {
+  return apiJson(`/api/admin/users/${encodeURIComponent(userId)}/password`, {
+    method: "POST", body: JSON.stringify({ password }),
+  });
+}
+function adminClearUserData(userId) {
+  return apiJson(`/api/admin/users/${encodeURIComponent(userId)}/clear`, { method: "POST" });
+}
+function adminDeleteUser(userId) {
+  return apiJson(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "DELETE" });
+}
+/** 整库重置：确认短语固定为 RESET，密码是服务端要求的第二道确认。 */
+function adminResetDatabase(password) {
+  return apiJson("/api/admin/reset", {
+    method: "POST", body: JSON.stringify({ confirm: "RESET", password }),
+  });
+}
+
 Object.assign(window, {
   getAuth, setAuth, clearAuth, authHeaders,
-  loginApi, registerApi, checkAuth,
+  loginApi, registerApi, checkAuth, fetchMe,
+  adminListUsers, adminUserDetail, adminSetUserStatus,
+  adminResetUserPassword, adminClearUserData, adminDeleteUser, adminResetDatabase,
   streamPlan, confirmModification,
   getHistory, getHistoryItem, deleteHistoryItem,
   getProfile, createMemoryFact, updateMemoryFact, approveMemoryFact, deleteMemoryFact,
